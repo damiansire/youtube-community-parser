@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subscriptor Data Parser</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="panel" aria-label="Analizar">
+        <div class="brand">
+          <span class="brand__mark" aria-hidden="true"></span>
+          <div>
+            <h1 class="brand__name">Subscriptor</h1>
+            <p class="brand__tag">Conocé a tu comunidad</p>
+          </div>
+        </div>
+
+        <form id="form" class="form">
+          <div class="field">
+            <label for="target">Canal o video de YouTube</label>
+            <input id="target" name="target" type="text" placeholder="ID del canal o del video"
+              autocomplete="off" spellcheck="false" />
+          </div>
+
+          <fieldset class="seg" aria-label="Tipo de análisis">
+            <label class="seg__opt">
+              <input type="radio" name="mode" value="channel" checked />
+              <span>Canal</span>
+            </label>
+            <label class="seg__opt">
+              <input type="radio" name="mode" value="video" />
+              <span>Video</span>
+            </label>
+          </fieldset>
+
+          <div class="field">
+            <label for="apikey">API key de YouTube Data v3</label>
+            <input id="apikey" name="apikey" type="password" placeholder="Necesaria para datos reales"
+              autocomplete="off" spellcheck="false" />
+          </div>
+
+          <button id="run" class="btn" type="submit">Analizar comunidad</button>
+          <button id="demo" class="btn btn--ghost" type="button">Ver con datos de ejemplo</button>
+          <p id="status" class="status" role="status"></p>
+        </form>
+      </aside>
+
+      <main class="stage">
+        <section id="empty" class="empty">
+          <h2>Tu padrón de comentaristas, ordenado.</h2>
+          <p>Analizá un canal o video y vas a ver quiénes son los que más participan,
+            quiénes los que menos, y la forma completa de tu comunidad.</p>
+        </section>
+
+        <section id="results" class="results" hidden>
+          <header class="summary">
+            <div class="stat">
+              <span class="stat__num" id="stat-comments">0</span>
+              <span class="stat__lbl">comentarios</span>
+            </div>
+            <div class="stat">
+              <span class="stat__num" id="stat-people">0</span>
+              <span class="stat__lbl">personas</span>
+            </div>
+          </header>
+
+          <section class="spectrum" aria-label="Espectro de participación">
+            <h3 class="spectrum__title">Espectro de participación</h3>
+            <div id="spectrum-bar" class="spectrum__bar"></div>
+            <div class="spectrum__legend">
+              <span>más activos</span>
+              <span>menos activos</span>
+            </div>
+            <p id="spectrum-tip" class="spectrum__tip">&nbsp;</p>
+          </section>
+
+          <div class="rosters">
+            <section class="roster">
+              <h3 class="roster__title">Los que más comentan</h3>
+              <ol id="top" class="roster__list"></ol>
+            </section>
+            <section class="roster">
+              <h3 class="roster__title roster__title--quiet">Los que menos comentan</h3>
+              <ol id="bottom" class="roster__list"></ol>
+            </section>
+          </div>
+
+          <section class="table-wrap">
+            <h3 class="roster__title">Padrón completo</h3>
+            <table class="table">
+              <thead>
+                <tr>
+                  <th class="num">#</th>
+                  <th>Persona</th>
+                  <th class="num">Comentarios</th>
+                  <th class="num">Likes</th>
+                  <th>Última vez</th>
+                </tr>
+              </thead>
+              <tbody id="rows"></tbody>
+            </table>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <script src="main.js"></script>
+  </body>
+</html>
