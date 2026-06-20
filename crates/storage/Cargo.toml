@@ -9,6 +9,6 @@ description = "Persistencia local (SQLite) del histórico de comentarios y comen
 
 [dependencies]
 sdp-core = { path = "../core" }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite.workspace = true
 chrono.workspace = true
-thiserror = "2"
+thiserror.workspace = true
