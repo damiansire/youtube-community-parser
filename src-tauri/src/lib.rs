@@ -102,6 +102,12 @@ fn analyze_demo() -> Analysis {
     Analysis::build(&comments, &commenters, 3)
 }
 
+// TODO(async): estos comandos son `async fn` pero `ingest::video`/`ingest::channel`
+// usan `std::process::Command::output()` (bloqueante) por dentro, lo que bloquea un
+// worker de Tokio y congela la UI mientras corre Node + red. Envolver la llamada en
+// `tokio::task::spawn_blocking(...)` (o migrar `ingest::run` a `tokio::process::Command`
+// + `.output().await`). Pendiente de verificar con build de `src-tauri`.
+
 /// Analiza los comentarios de un video real vía el sidecar de YouTube.
 #[tauri::command]
 async fn analyze_video(video_id: String, api_key: String) -> Result<Analysis, CommandError> {
