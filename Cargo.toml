@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/storage", "src-tauri"]
+
+[workspace.package]
+edition = "2021"
+license = "ISC"
+authors = ["Damian Sire <damiansire@gmail.com>"]
+repository = "https://github.com/damiansire/Subscriptor-Data-Parser"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }

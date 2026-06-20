@@ -1,2 +1,13 @@
+# Rust / Cargo
+/target
+**/target
+
+# Tauri (generado)
+/src-tauri/gen
+
+# Node
+node_modules
+/ingest/node_modules
+
+# Entorno
 .env
-/node_modules
