@@ -76,14 +76,22 @@ fn sort_most_active_first(stats: &mut [CommenterStats]) {
 }
 
 /// Los `n` que **más** comentan.
-pub fn most_active(comments: &[Comment], commenters: &[Commenter], n: usize) -> Vec<CommenterStats> {
+pub fn most_active(
+    comments: &[Comment],
+    commenters: &[Commenter],
+    n: usize,
+) -> Vec<CommenterStats> {
     let mut ranked = rank_commenters(comments, commenters);
     ranked.truncate(n);
     ranked
 }
 
 /// Los `n` que **menos** comentan (el extremo inferior del mismo ranking).
-pub fn least_active(comments: &[Comment], commenters: &[Commenter], n: usize) -> Vec<CommenterStats> {
+pub fn least_active(
+    comments: &[Comment],
+    commenters: &[Commenter],
+    n: usize,
+) -> Vec<CommenterStats> {
     let ranked = rank_commenters(comments, commenters);
     let start = ranked.len().saturating_sub(n);
     ranked[start..].to_vec()

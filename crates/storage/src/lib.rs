@@ -195,7 +195,10 @@ mod tests {
         let comments = store.all_comments().unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].like_count, 5);
-        assert_eq!(comments[0].published_at, comment("c1", "ana", 5, 10).published_at);
+        assert_eq!(
+            comments[0].published_at,
+            comment("c1", "ana", 5, 10).published_at
+        );
     }
 
     #[test]
@@ -203,7 +206,9 @@ mod tests {
         let mut store = Store::open_in_memory().unwrap();
         store.save_comments(&[comment("c1", "ana", 1, 10)]).unwrap();
         // mismo id, más likes: debe actualizar, no duplicar.
-        store.save_comments(&[comment("c1", "ana", 99, 10)]).unwrap();
+        store
+            .save_comments(&[comment("c1", "ana", 99, 10)])
+            .unwrap();
 
         let comments = store.all_comments().unwrap();
         assert_eq!(comments.len(), 1);

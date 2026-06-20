@@ -6,8 +6,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use serde::Deserialize;
 use sdp_core::{Comment, Commenter};
+use serde::Deserialize;
 
 /// Lo que emite el sidecar por stdout (ver `ingest/src/mapper.js`).
 #[derive(Debug, Deserialize)]

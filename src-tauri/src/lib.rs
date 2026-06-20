@@ -4,8 +4,8 @@
 
 mod ingest;
 
-use serde::Serialize;
 use sdp_core::{least_active, most_active, rank_commenters, Comment, Commenter, CommenterStats};
+use serde::Serialize;
 
 /// Respuesta de un análisis: ranking completo + los extremos ya recortados,
 /// listo para que la UI arme sus tablas sin recalcular.
@@ -48,19 +48,48 @@ fn sample() -> (Vec<Comment>, Vec<Commenter>) {
     use chrono::{TimeZone, Utc};
     let at = |h: u32| Utc.with_ymd_and_hms(2021, 9, 27, h, 0, 0).single().unwrap();
     let commenters = vec![
-        Commenter { channel_id: "ana".into(), display_name: "Ana".into(), profile_image_url: None, channel_url: None },
-        Commenter { channel_id: "beto".into(), display_name: "Beto".into(), profile_image_url: None, channel_url: None },
-        Commenter { channel_id: "caro".into(), display_name: "Caro".into(), profile_image_url: None, channel_url: None },
-        Commenter { channel_id: "dia".into(), display_name: "Día".into(), profile_image_url: None, channel_url: None },
+        Commenter {
+            channel_id: "ana".into(),
+            display_name: "Ana".into(),
+            profile_image_url: None,
+            channel_url: None,
+        },
+        Commenter {
+            channel_id: "beto".into(),
+            display_name: "Beto".into(),
+            profile_image_url: None,
+            channel_url: None,
+        },
+        Commenter {
+            channel_id: "caro".into(),
+            display_name: "Caro".into(),
+            profile_image_url: None,
+            channel_url: None,
+        },
+        Commenter {
+            channel_id: "dia".into(),
+            display_name: "Día".into(),
+            profile_image_url: None,
+            channel_url: None,
+        },
     ];
     let c = |id: &str, who: &str, likes: u64, h: u32| Comment {
-        id: id.into(), video_id: "demo".into(), author_channel_id: who.into(),
-        text: "comentario de ejemplo".into(), like_count: likes, published_at: at(h),
+        id: id.into(),
+        video_id: "demo".into(),
+        author_channel_id: who.into(),
+        text: "comentario de ejemplo".into(),
+        like_count: likes,
+        published_at: at(h),
     };
     let comments = vec![
-        c("1", "ana", 5, 9), c("2", "ana", 2, 10), c("3", "ana", 0, 11), c("4", "ana", 1, 12),
-        c("5", "beto", 8, 9), c("6", "beto", 3, 13),
-        c("7", "caro", 1, 14), c("8", "caro", 0, 15),
+        c("1", "ana", 5, 9),
+        c("2", "ana", 2, 10),
+        c("3", "ana", 0, 11),
+        c("4", "ana", 1, 12),
+        c("5", "beto", 8, 9),
+        c("6", "beto", 3, 13),
+        c("7", "caro", 1, 14),
+        c("8", "caro", 0, 15),
         c("9", "dia", 12, 10),
     ];
     (comments, commenters)
