@@ -1,0 +1,16 @@
+# Normaliza finales de línea: el repo trabaja en LF (coincide con rustfmt
+# `newline_style = "Unix"`), evitando diffs ruidosos entre Windows y Unix.
+* text=auto eol=lf
+
+# Binarios: nunca tocar.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Generados/locks: marcados para colapsar en diffs de review.
+Cargo.lock linguist-generated=true
+*-lock.json linguist-generated=true
