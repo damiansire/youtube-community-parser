@@ -4,12 +4,13 @@
 
 mod youtube;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use sdp_core::{
-    least_active_of, most_active_of, rank_commenters, Comment, Commenter, CommenterStats,
-    CorpusInsights, CostEstimate, CostPolicy, SearchPlan, SeoInput, SeoReport, VideoIdea,
-    VideoMeta,
+    least_active_of, most_active_of, rank_commenters, BenchmarkReport, Comment, Commenter,
+    CommenterStats, CorpusInsights, CostEstimate, CostPolicy, SearchPlan, SeoInput, SeoReport,
+    VideoIdea, VideoMeta,
 };
 use sdp_storage::Store;
 use secrecy::SecretString;
@@ -366,6 +367,45 @@ async fn run_search(
     Ok(client(api_key)?.search(&plan).await?)
 }
 
+/// Compara mi canal contra competidores (F11) usando la metadata de videos ya
+/// ingestada (F9) y los comentarios. Costo 0, sin red. Un competidor sin datos
+/// aparece como brecha "sin datos" en vez de fallar.
+#[tauri::command]
+async fn benchmark_channels(
+    app: tauri::AppHandle,
+    my_id: String,
+    competitor_ids: Vec<String>,
+) -> Result<BenchmarkReport, CommandError> {
+    let path = db_path(&app)?;
+    let (videos, comments) =
+        tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
+            let store = Store::open(path)?;
+            Ok((store.all_video_meta()?, store.all_comments()?))
+        })
+        .await
+        .expect("la tarea de lectura del histórico no debe paniquear")?;
+
+    // Perfila un canal: sus videos + los comentarios sobre esos videos.
+    let profile = |id: &str| {
+        let chan_videos: Vec<VideoMeta> = videos
+            .iter()
+            .filter(|v| v.channel_id == id)
+            .cloned()
+            .collect();
+        let video_ids: HashSet<&str> = chan_videos.iter().map(|v| v.video_id.as_str()).collect();
+        let chan_comments: Vec<Comment> = comments
+            .iter()
+            .filter(|c| video_ids.contains(c.video_id.as_str()))
+            .cloned()
+            .collect();
+        sdp_core::profile_channel(id, &chan_videos, &chan_comments)
+    };
+
+    let mine = profile(&my_id);
+    let competitors = competitor_ids.iter().map(|id| profile(id)).collect();
+    Ok(sdp_core::benchmark(mine, competitors))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -380,7 +420,8 @@ pub fn run() {
             estimate_video_meta,
             fetch_video_meta,
             estimate_search,
-            run_search
+            run_search,
+            benchmark_channels
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la aplicación Tauri");
