@@ -10,3 +10,8 @@ description = "Dominio puro del sistema de trackeo de comentarios: modelos y ran
 [dependencies]
 serde.workspace = true
 chrono.workspace = true
+
+# Bench de medición (Fase 2/F4): main() plano, sin criterion ni deps externas.
+[[bench]]
+name = "ranking_bench"
+harness = false
