@@ -12,3 +12,5 @@ sdp-core = { path = "../core" }
 rusqlite.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
+# Tags de video_meta se serializan como JSON en una columna TEXT.
+serde_json.workspace = true

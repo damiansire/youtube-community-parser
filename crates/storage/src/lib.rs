@@ -8,7 +8,7 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
-use sdp_core::{Comment, Commenter};
+use sdp_core::{Comment, Commenter, VideoMeta};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -16,6 +16,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("fecha inválida en la base: {0}")]
     Date(#[from] chrono::ParseError),
+    #[error("tags inválidos en la base (JSON): {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -53,7 +55,18 @@ impl Store {
                 published_at      TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_comment_author
-                ON comment(author_channel_id);",
+                ON comment(author_channel_id);
+            CREATE TABLE IF NOT EXISTS video_meta (
+                video_id      TEXT PRIMARY KEY,
+                channel_id    TEXT NOT NULL,
+                title         TEXT NOT NULL,
+                description   TEXT NOT NULL,
+                tags          TEXT NOT NULL,
+                view_count    INTEGER,
+                like_count    INTEGER,
+                comment_count INTEGER,
+                published_at  TEXT NOT NULL
+            );",
         )?;
         Ok(Store { conn })
     }
@@ -155,6 +168,88 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// Inserta o actualiza metadata de videos (F9, idempotente por `video_id`).
+    /// Los `tags` se guardan como JSON en una columna TEXT; las cuentas pueden
+    /// ser `NULL` (estadísticas ocultas).
+    pub fn save_video_meta(&mut self, videos: &[VideoMeta]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO video_meta
+                    (video_id, channel_id, title, description, tags,
+                     view_count, like_count, comment_count, published_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(video_id) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    title = excluded.title,
+                    description = excluded.description,
+                    tags = excluded.tags,
+                    view_count = excluded.view_count,
+                    like_count = excluded.like_count,
+                    comment_count = excluded.comment_count,
+                    published_at = excluded.published_at",
+            )?;
+            for v in videos {
+                let tags = serde_json::to_string(&v.tags)?;
+                stmt.execute(params![
+                    v.video_id,
+                    v.channel_id,
+                    v.title,
+                    v.description,
+                    tags,
+                    v.view_count.map(|n| n as i64),
+                    v.like_count.map(|n| n as i64),
+                    v.comment_count.map(|n| n as i64),
+                    v.published_at.to_rfc3339(),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Toda la metadata de videos guardada.
+    pub fn all_video_meta(&self) -> Result<Vec<VideoMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT video_id, channel_id, title, description, tags,
+                    view_count, like_count, comment_count, published_at
+             FROM video_meta",
+        )?;
+        // Traemos las columnas crudas (tags JSON + fecha string) y las parseamos
+        // fuera del closure de rusqlite, igual que en `all_comments`.
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, String>(8)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (video_id, channel_id, title, description, tags, views, likes, comments, published) =
+                row?;
+            out.push(VideoMeta {
+                video_id,
+                channel_id,
+                title,
+                description,
+                tags: serde_json::from_str(&tags)?,
+                view_count: views.map(|n| n as u64),
+                like_count: likes.map(|n| n as u64),
+                comment_count: comments.map(|n| n as u64),
+                published_at: DateTime::parse_from_rfc3339(&published)?.with_timezone(&Utc),
+            });
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +308,50 @@ mod tests {
         let comments = store.all_comments().unwrap();
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].like_count, 99);
+    }
+
+    fn video_meta(id: &str, views: Option<u64>) -> VideoMeta {
+        VideoMeta {
+            video_id: id.into(),
+            channel_id: "UCcanal".into(),
+            title: format!("titulo {id}"),
+            description: "desc".into(),
+            tags: vec!["angular".into(), "signals".into()],
+            view_count: views,
+            like_count: Some(56),
+            comment_count: Some(7),
+            published_at: Utc.with_ymd_and_hms(2021, 9, 27, 3, 0, 0).single().unwrap(),
+        }
+    }
+
+    #[test]
+    fn video_meta_round_trip_con_stats_ocultas() {
+        let mut store = Store::open_in_memory().unwrap();
+        // un video con stats visibles y otro con view_count oculto (None).
+        store
+            .save_video_meta(&[video_meta("v1", Some(1234)), video_meta("v2", None)])
+            .unwrap();
+
+        let mut metas = store.all_video_meta().unwrap();
+        metas.sort_by(|a, b| a.video_id.cmp(&b.video_id));
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].view_count, Some(1234));
+        assert_eq!(metas[0].tags, vec!["angular", "signals"]);
+        assert_eq!(metas[1].view_count, None, "None se preserva como NULL");
+        assert_eq!(metas[1].like_count, Some(56));
+    }
+
+    #[test]
+    fn video_meta_upsert_es_idempotente() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.save_video_meta(&[video_meta("v1", Some(1))]).unwrap();
+        store
+            .save_video_meta(&[video_meta("v1", Some(999))])
+            .unwrap();
+
+        let metas = store.all_video_meta().unwrap();
+        assert_eq!(metas.len(), 1, "mismo id no duplica");
+        assert_eq!(metas[0].view_count, Some(999), "actualiza el valor");
     }
 
     #[test]
