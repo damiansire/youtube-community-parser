@@ -18,6 +18,13 @@ thiserror = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }
+# Cliente HTTP nativo de la ingesta (reemplaza al sidecar Node). rustls-tls para
+# no depender de OpenSSL del sistema (distribuibilidad). json para parseo tipado.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# La API key no debe quedar en claro en memoria más de lo necesario (F2).
+secrecy = "0.10"
+urlencoding = "2"
 
 # Deps optimizadas incluso en dev (sidecar/parsing corren rápido) mientras
 # nuestro código queda en opt-level=0 para compilar veloz.

@@ -2,12 +2,14 @@
 //!
 //! Toda la lógica vive acá (no en `main.rs`) por compatibilidad con mobile.
 
-mod ingest;
+mod youtube;
 
 use sdp_core::{
     least_active_of, most_active_of, rank_commenters, Comment, Commenter, CommenterStats,
 };
+use secrecy::SecretString;
 use serde::Serialize;
+use youtube::{Ingested, YoutubeClient};
 
 /// Respuesta de un análisis: ranking completo + los extremos ya recortados,
 /// listo para que la UI arme sus tablas sin recalcular.
@@ -18,9 +20,23 @@ pub struct Analysis {
     pub ranking: Vec<CommenterStats>,
     pub top: Vec<CommenterStats>,
     pub bottom: Vec<CommenterStats>,
+    /// `true` si la ingesta se cortó a mitad (típicamente por cuota): los datos
+    /// son parciales pero válidos (F4). La UI puede avisar al usuario.
+    pub incomplete: bool,
+    /// Motivo legible del corte, si lo hubo.
+    pub incomplete_reason: Option<String>,
 }
 
 impl Analysis {
+    /// Construye el análisis a partir de una ingesta (preservando su flag de
+    /// incompletitud).
+    fn from_ingested(data: &Ingested, extremes: usize) -> Self {
+        let mut analysis = Self::build(&data.comments, &data.commenters, extremes);
+        analysis.incomplete = data.incomplete;
+        analysis.incomplete_reason = data.incomplete_reason.clone();
+        analysis
+    }
+
     fn build(comments: &[Comment], commenters: &[Commenter], extremes: usize) -> Self {
         // F5: calculamos el ranking UNA vez y derivamos ambos extremos de él, en
         // lugar de recalcularlo por cada extremo.
@@ -43,6 +59,8 @@ impl Analysis {
             ranking,
             top,
             bottom,
+            incomplete: false,
+            incomplete_reason: None,
         }
     }
 }
@@ -51,9 +69,7 @@ impl Analysis {
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     #[error(transparent)]
-    Ingest(#[from] ingest::IngestError),
-    #[error("la tarea de ingesta se interrumpió: {0}")]
-    Join(String),
+    Youtube(#[from] youtube::YoutubeError),
 }
 
 impl serde::Serialize for CommandError {
@@ -121,30 +137,30 @@ fn analyze_demo() -> Analysis {
     Analysis::build(&comments, &commenters, 3)
 }
 
-/// Analiza los comentarios de un video real vía el sidecar de YouTube.
-///
-/// `ingest::video` es bloqueante (`std::process::Command::output()` + Node +
-/// red), así que se ejecuta en `spawn_blocking` para no congelar el worker de
-/// Tokio que atiende este comando.
-#[tauri::command]
-async fn analyze_video(video_id: String, api_key: String) -> Result<Analysis, CommandError> {
-    let data = tauri::async_runtime::spawn_blocking(move || ingest::video(&video_id, &api_key))
-        .await
-        .map_err(|e| CommandError::Join(e.to_string()))??;
-    Ok(Analysis::build(&data.comments, &data.commenters, 5))
+/// Envuelve la API key en `SecretString` en cuanto cruza el IPC, para
+/// minimizar el tiempo que vive en claro en memoria (F2). Ver `youtube.rs`.
+fn client(api_key: String) -> Result<YoutubeClient, CommandError> {
+    Ok(YoutubeClient::new(SecretString::from(api_key))?)
 }
 
-/// Analiza todos los comentarios de un canal real vía el sidecar de YouTube.
+/// Analiza los comentarios de un video real vía el cliente nativo de YouTube.
 ///
-/// Igual que `analyze_video`: la ingesta es bloqueante y corre en
-/// `spawn_blocking` para no bloquear el runtime.
+/// La ingesta es **async pura** (reqwest): no hay subproceso Node ni
+/// `spawn_blocking`. Corre directo en el runtime de Tokio de Tauri.
+#[tauri::command]
+async fn analyze_video(video_id: String, api_key: String) -> Result<Analysis, CommandError> {
+    let data = client(api_key)?.ingest_video(&video_id).await?;
+    Ok(Analysis::from_ingested(&data, 5))
+}
+
+/// Analiza todos los comentarios de un canal real vía el cliente nativo.
+///
+/// Igual que `analyze_video`, pero resiliente a cuota: ante `quotaExceeded` (u
+/// otro error a mitad) devuelve lo parcial con `incomplete = true` (F4).
 #[tauri::command]
 async fn analyze_channel(channel_id: String, api_key: String) -> Result<Analysis, CommandError> {
-    let data =
-        tauri::async_runtime::spawn_blocking(move || ingest::channel(&channel_id, &api_key))
-            .await
-            .map_err(|e| CommandError::Join(e.to_string()))??;
-    Ok(Analysis::build(&data.comments, &data.commenters, 5))
+    let data = client(api_key)?.ingest_channel(&channel_id).await?;
+    Ok(Analysis::from_ingested(&data, 5))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

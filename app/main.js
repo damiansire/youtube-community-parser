@@ -142,7 +142,15 @@ async function analyzeReal() {
     const args = mode === "channel" ? { channelId: target, apiKey } : { videoId: target, apiKey };
     const analysis = await invoke(cmd, args);
     render(analysis);
-    setStatus(`${analysis.total_commenters} personas en ${analysis.total_comments} comentarios.`);
+    const base = `${analysis.total_commenters} personas en ${analysis.total_comments} comentarios.`;
+    if (analysis.incomplete) {
+      // Resultados parciales (típicamente cuota agotada): mostramos lo traído
+      // y avisamos que está incompleto, en vez de descartar el progreso (F4).
+      const why = analysis.incomplete_reason ? ` (${analysis.incomplete_reason})` : "";
+      setStatus(`Resultados parciales: ${base} Se cortó antes de terminar${why}.`, "error");
+    } else {
+      setStatus(base);
+    }
   } catch (err) {
     setStatus(String(err), "error");
   } finally {
