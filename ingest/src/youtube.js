@@ -13,6 +13,11 @@ const https = require("https");
 
 const API = "https://www.googleapis.com/youtube/v3";
 
+// Timeout por request (ms). Sin esto, una conexión half-open deja la Promise
+// sin resolver para siempre: el proceso Node nunca termina y el lado Rust
+// (Command::output) queda colgado, congelando la app. Configurable por entorno.
+const REQUEST_TIMEOUT_MS = Number(process.env.SDP_HTTP_TIMEOUT_MS) || 15000;
+
 /** Arma un query string, salteando valores vacíos/nulos y encodeando. */
 function qs(params) {
   return Object.entries(params)
@@ -24,30 +29,44 @@ function qs(params) {
 /** GET + parse JSON. Rechaza con Error enriquecido (.status, .reason) en HTTP no-2xx. */
 function getJson(url) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString();
-          let body;
-          try {
-            body = text ? JSON.parse(text) : {};
-          } catch {
-            return reject(new Error(`respuesta no-JSON de la API (HTTP ${res.statusCode})`));
-          }
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            const apiErr = body && body.error;
-            const reason = apiErr && apiErr.errors && apiErr.errors[0] && apiErr.errors[0].reason;
-            const err = new Error((apiErr && apiErr.message) || `HTTP ${res.statusCode}`);
-            err.status = res.statusCode;
-            if (reason) err.reason = reason;
-            return reject(err);
-          }
-          resolve(body);
-        });
-      })
-      .on("error", reject);
+    let settled = false;
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      reject(err);
+    };
+
+    const req = https.get(url, (res) => {
+      const chunks = [];
+      res.on("error", fail);
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        if (settled) return;
+        settled = true;
+        const text = Buffer.concat(chunks).toString();
+        let body;
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch {
+          return reject(new Error(`respuesta no-JSON de la API (HTTP ${res.statusCode})`));
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          const apiErr = body && body.error;
+          const reason = apiErr && apiErr.errors && apiErr.errors[0] && apiErr.errors[0].reason;
+          const err = new Error((apiErr && apiErr.message) || `HTTP ${res.statusCode}`);
+          err.status = res.statusCode;
+          if (reason) err.reason = reason;
+          return reject(err);
+        }
+        resolve(body);
+      });
+    });
+
+    req.on("error", fail);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      fail(new Error(`timeout de ${REQUEST_TIMEOUT_MS}ms esperando a la YouTube Data API`));
+    });
   });
 }
 
