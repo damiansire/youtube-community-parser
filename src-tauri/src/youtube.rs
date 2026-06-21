@@ -308,7 +308,12 @@ struct SearchSnippet {
 
 /// Aplana un `commentThread` a `(Comment, Commenter)`. Equivalente a
 /// `flattenThread` + `mapper.js` del sidecar Node, en un solo paso tipado.
-fn thread_to_models(thread: &CommentThread) -> (Comment, Commenter) {
+///
+/// `fetched_at` es la fecha de referencia que se usa SOLO si el item no trae
+/// `publishedAt`. Se **inyecta** (no se llama `Utc::now()` adentro) para que el
+/// mapeo sea determinista y testeable con fixtures (auditoría P14): la misma
+/// entrada produce siempre la misma salida.
+fn thread_to_models(thread: &CommentThread, fetched_at: DateTime<Utc>) -> (Comment, Commenter) {
     let top = &thread.snippet.top_level_comment;
     let s = &top.snippet;
     let author_id = s
@@ -327,7 +332,7 @@ fn thread_to_models(thread: &CommentThread) -> (Comment, Commenter) {
             .or_else(|| s.text_original.clone())
             .unwrap_or_default(),
         like_count: s.like_count,
-        published_at: s.published_at.unwrap_or_else(Utc::now),
+        published_at: s.published_at.unwrap_or(fetched_at),
     };
     let commenter = Commenter {
         channel_id: author_id,
@@ -339,13 +344,15 @@ fn thread_to_models(thread: &CommentThread) -> (Comment, Commenter) {
 }
 
 /// Junta comentarios de varios threads, deduplicando comentaristas por
-/// `channel_id` (una persona comenta muchas veces). PURO.
-fn collect(threads: &[CommentThread]) -> (Vec<Comment>, Vec<Commenter>) {
+/// `channel_id` (una persona comenta muchas veces). PURO. `fetched_at` se
+/// propaga al mapeo como fecha de referencia para los items sin `publishedAt`
+/// (auditoría P14), manteniendo el determinismo.
+fn collect(threads: &[CommentThread], fetched_at: DateTime<Utc>) -> (Vec<Comment>, Vec<Commenter>) {
     let mut comments = Vec::with_capacity(threads.len());
     let mut commenters: Vec<Commenter> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for t in threads {
-        let (comment, commenter) = thread_to_models(t);
+        let (comment, commenter) = thread_to_models(t, fetched_at);
         if seen.insert(commenter.channel_id.clone()) {
             commenters.push(commenter);
         }
@@ -358,7 +365,11 @@ fn collect(threads: &[CommentThread]) -> (Vec<Comment>, Vec<Commenter>) {
 /// testeable con un fixture JSON sin red. Las cuentas vienen como string en la
 /// API y acá se parsean a `u64`; si el video oculta estadísticas quedan en
 /// `None` (no se inventan ceros).
-fn video_item_to_meta(item: &VideoItem) -> VideoMeta {
+///
+/// `fetched_at` se inyecta como fecha de referencia para los videos sin
+/// `publishedAt` (auditoría P14): el mapeo queda determinista, sin `Utc::now()`
+/// adentro que sesgaría la cadencia del benchmark con un fixture sin fecha.
+fn video_item_to_meta(item: &VideoItem, fetched_at: DateTime<Utc>) -> VideoMeta {
     let s = &item.snippet;
     let stats = item.statistics.as_ref();
     let count = |field: &Option<String>| field.as_ref().and_then(|n| n.parse::<u64>().ok());
@@ -371,21 +382,24 @@ fn video_item_to_meta(item: &VideoItem) -> VideoMeta {
         view_count: stats.and_then(|st| count(&st.view_count)),
         like_count: stats.and_then(|st| count(&st.like_count)),
         comment_count: stats.and_then(|st| count(&st.comment_count)),
-        published_at: s.published_at.unwrap_or_else(Utc::now),
+        published_at: s.published_at.unwrap_or(fetched_at),
     }
 }
 
 /// Mapea un item de `search.list` a `SearchHit` (F10). Devuelve `None` para los
 /// resultados que no son videos (canales/playlists: sin `videoId`), que el
 /// llamador descarta. PURO.
-fn search_item_to_hit(item: &SearchItem) -> Option<SearchHit> {
+///
+/// `fetched_at` se inyecta como fecha de referencia para los hits sin
+/// `publishedAt` (auditoría P14): mapeo determinista, testeable con fixtures.
+fn search_item_to_hit(item: &SearchItem, fetched_at: DateTime<Utc>) -> Option<SearchHit> {
     let video_id = item.id.video_id.clone()?;
     let s = &item.snippet;
     Some(SearchHit {
         video_id,
         channel_id: s.channel_id.clone().unwrap_or_default(),
         title: s.title.clone().unwrap_or_default(),
-        published_at: s.published_at.unwrap_or_else(Utc::now),
+        published_at: s.published_at.unwrap_or(fetched_at),
     })
 }
 
@@ -604,7 +618,9 @@ impl YoutubeClient {
                 limits.max_comments,
             )
             .await?;
-        let (comments, commenters) = collect(&threads);
+        // Reloj capturado en el boundary (acá vive el efecto): se usa como fecha
+        // de referencia solo para los comentarios sin `publishedAt` (P14).
+        let (comments, commenters) = collect(&threads, Utc::now());
         Ok(Ingested {
             commenters,
             comments,
@@ -672,7 +688,7 @@ impl YoutubeClient {
             }
         }
 
-        let (comments, commenters) = collect(&threads);
+        let (comments, commenters) = collect(&threads, Utc::now());
         Ok(Ingested {
             commenters,
             comments,
@@ -692,6 +708,8 @@ impl YoutubeClient {
     /// No falla por ids inexistentes: la API simplemente los omite de `items`,
     /// así que el resultado puede tener menos elementos que `ids`.
     pub async fn fetch_video_meta(&self, ids: &[String]) -> Result<Vec<VideoMeta>, YoutubeError> {
+        // Reloj del boundary, fecha de referencia para videos sin `publishedAt` (P14).
+        let fetched_at = Utc::now();
         let mut out = Vec::with_capacity(ids.len());
         for chunk in ids.chunks(50) {
             let joined = chunk.join(",");
@@ -701,7 +719,11 @@ impl YoutubeClient {
                     &[("id", joined.as_str()), ("part", "snippet,statistics")],
                 )
                 .await?;
-            out.extend(list.items.iter().map(video_item_to_meta));
+            out.extend(
+                list.items
+                    .iter()
+                    .map(|item| video_item_to_meta(item, fetched_at)),
+            );
         }
         Ok(out)
     }
@@ -719,6 +741,8 @@ impl YoutubeClient {
         } else {
             "relevance"
         };
+        // Reloj del boundary, fecha de referencia para hits sin `publishedAt` (P14).
+        let fetched_at = Utc::now();
         let mut hits = Vec::new();
         let mut page_token = String::new();
         let mut pages = 0u32;
@@ -750,7 +774,11 @@ impl YoutubeClient {
                 Err(e) => return Err(e),
             };
             pages += 1;
-            hits.extend(list.items.iter().filter_map(search_item_to_hit));
+            hits.extend(
+                list.items
+                    .iter()
+                    .filter_map(|item| search_item_to_hit(item, fetched_at)),
+            );
             match list.next_page_token {
                 Some(t) if pages < plan.max_pages => page_token = t,
                 _ => break,
@@ -819,9 +847,16 @@ mod tests {
         serde_json::from_str(THREAD_JSON).unwrap()
     }
 
+    /// Fecha de referencia fija para los tests de mapeo (P14): inyectarla en vez
+    /// de `Utc::now()` hace el mapeo determinista.
+    fn ref_now() -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).single().unwrap()
+    }
+
     #[test]
     fn aplana_thread_a_modelos_del_core() {
-        let (comment, commenter) = thread_to_models(&thread());
+        let (comment, commenter) = thread_to_models(&thread(), ref_now());
         assert_eq!(comment.id, "Ugx-comment-1");
         assert_eq!(comment.video_id, "vid1");
         // Clave: authorChannelId.value, no "[object Object]".
@@ -849,7 +884,7 @@ mod tests {
     #[test]
     fn collect_dedup_comentaristas_por_channel_id() {
         // misma persona en dos threads: 2 comentarios, 1 comentarista.
-        let (comments, commenters) = collect(&[thread(), thread()]);
+        let (comments, commenters) = collect(&[thread(), thread()], ref_now());
         assert_eq!(comments.len(), 2);
         assert_eq!(commenters.len(), 1);
         assert_eq!(commenters[0].channel_id, "UCana");
@@ -960,7 +995,7 @@ mod tests {
     #[test]
     fn mapea_video_item_a_meta_con_cuentas_string() {
         let item: VideoItem = serde_json::from_str(VIDEO_ITEM_JSON).unwrap();
-        let meta = video_item_to_meta(&item);
+        let meta = video_item_to_meta(&item, ref_now());
         assert_eq!(meta.video_id, "vid1");
         assert_eq!(meta.channel_id, "UCcanal");
         assert_eq!(meta.title, "Cómo usar señales en Angular");
@@ -983,7 +1018,7 @@ mod tests {
           }
         }"#;
         let item: VideoItem = serde_json::from_str(json).unwrap();
-        let meta = video_item_to_meta(&item);
+        let meta = video_item_to_meta(&item, ref_now());
         assert_eq!(meta.view_count, None);
         assert_eq!(meta.like_count, None);
         assert_eq!(meta.comment_count, None);
@@ -1012,7 +1047,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let hit = search_item_to_hit(&item).expect("un video debe mapear a hit");
+        let hit = search_item_to_hit(&item, ref_now()).expect("un video debe mapear a hit");
         assert_eq!(hit.video_id, "v1");
         assert_eq!(hit.channel_id, "UCotro");
         assert_eq!(hit.title, "Competencia");
@@ -1029,7 +1064,46 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(search_item_to_hit(&item).is_none());
+        assert!(search_item_to_hit(&item, ref_now()).is_none());
+    }
+
+    // Fixture: un commentThread SIN `publishedAt` (la API a veces lo omite).
+    const THREAD_SIN_FECHA_JSON: &str = r#"{
+      "snippet": {
+        "topLevelComment": {
+          "id": "c-sin-fecha",
+          "snippet": {
+            "videoId": "vid1",
+            "textDisplay": "hola",
+            "authorDisplayName": "Ana",
+            "authorChannelId": { "value": "UCana" },
+            "likeCount": 0
+          }
+        }
+      }
+    }"#;
+
+    #[test]
+    fn mapeo_sin_fecha_usa_la_referencia_inyectada_y_es_determinista() {
+        // P14: un item sin `publishedAt` debe caer en la fecha de referencia
+        // inyectada (no en `Utc::now()`), de modo que dos corridas con el mismo
+        // fixture den exactamente la misma salida.
+        let thread: CommentThread = serde_json::from_str(THREAD_SIN_FECHA_JSON).unwrap();
+        let r = ref_now();
+        let (c1, _) = thread_to_models(&thread, r);
+        let (c2, _) = thread_to_models(&thread, r);
+        assert_eq!(
+            c1.published_at, r,
+            "sin fecha cae en la referencia, no en now"
+        );
+        assert_eq!(c1, c2, "mismo fixture + misma referencia => misma salida");
+
+        // Un video sin `publishedAt` también respeta la referencia inyectada.
+        let item: VideoItem = serde_json::from_str(
+            r#"{ "id": "vid9", "snippet": { "channelId": "UCx", "title": "t" } }"#,
+        )
+        .unwrap();
+        assert_eq!(video_item_to_meta(&item, r).published_at, r);
     }
 }
 

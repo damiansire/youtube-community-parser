@@ -144,27 +144,33 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, video_id, author_channel_id, text, like_count, published_at FROM comment",
         )?;
+        // Traemos las columnas crudas (incluida la fecha como string) y armamos el
+        // `Comment` recién tras parsear la fecha fuera del closure de rusqlite,
+        // igual que `all_video_meta`. Así no hace falta un `Utc::now()` placeholder
+        // muerto que luego se pisa (auditoría P14: era impuro y, si un refactor
+        // olvidaba la reasignación, dejaba la fecha en "ahora" en silencio).
         let rows = stmt.query_map([], |r| {
-            let published: String = r.get(5)?;
             Ok((
-                Comment {
-                    id: r.get(0)?,
-                    video_id: r.get(1)?,
-                    author_channel_id: r.get(2)?,
-                    text: r.get(3)?,
-                    like_count: r.get(4)?,
-                    // se valida al parsear, fuera del closure de rusqlite
-                    published_at: Utc::now(),
-                },
-                published,
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, u64>(4)?,
+                r.get::<_, String>(5)?,
             ))
         })?;
 
         let mut out = Vec::new();
         for row in rows {
-            let (mut comment, published) = row?;
-            comment.published_at = DateTime::parse_from_rfc3339(&published)?.with_timezone(&Utc);
-            out.push(comment);
+            let (id, video_id, author_channel_id, text, like_count, published) = row?;
+            out.push(Comment {
+                id,
+                video_id,
+                author_channel_id,
+                text,
+                like_count,
+                published_at: DateTime::parse_from_rfc3339(&published)?.with_timezone(&Utc),
+            });
         }
         Ok(out)
     }
