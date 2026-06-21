@@ -6,6 +6,7 @@
 pub mod benchmark;
 pub mod cost;
 pub mod ideas;
+pub mod insight;
 pub mod models;
 pub mod ranking;
 pub mod seo;
@@ -18,6 +19,10 @@ pub use cost::{
     estimate_search, estimate_video_meta, needs_optin, CostEstimate, CostKind, CostLine, CostPolicy,
 };
 pub use ideas::{detect_questions, detect_requests, mine_video_ideas, DemandSignal, VideoIdea};
+pub use insight::{
+    build_ideas_prompt, estimate_ideas_ai, parse_ideas_response, AiIdea, AiProvider, EnhancePrompt,
+    ParseError,
+};
 pub use models::{ChannelId, Comment, Commenter, SearchHit, SearchPlan, VideoMeta};
 pub use ranking::{
     least_active, least_active_of, most_active, most_active_of, rank_commenters, CommenterStats,

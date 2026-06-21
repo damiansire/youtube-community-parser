@@ -10,10 +10,9 @@ description = "Dominio puro del sistema de trackeo de comentarios: modelos y ran
 [dependencies]
 serde.workspace = true
 chrono.workspace = true
-
-# Solo para tests: round-trip de los modelos serde. El dominio sigue puro
-# (serde_json no entra en el código de producción de la crate).
-[dev-dependencies]
+# Errores tipados del contrato de IA (F12, módulo `insight`).
+thiserror.workspace = true
+# Parseo de la respuesta de IA (F12) y round-trip de modelos en tests.
 serde_json.workspace = true
 
 # Bench de medición (Fase 2/F4): main() plano, sin criterion ni deps externas.
