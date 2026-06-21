@@ -33,7 +33,7 @@ la máquina del usuario final).
 | Carpeta      | Qué es                                                                 |
 |--------------|------------------------------------------------------------------------|
 | `crates/core`| Dominio: `Commenter`, `Comment` y los rankings. Sin red ni UI.         |
-| `crates/storage` | Persistencia local SQLite del histórico (sin re-pegarle a la API). |
+| `crates/storage` | Persistencia local SQLite del histórico. Cada análisis se guarda (upsert idempotente) y `analyze_history` lo reanaliza sin volver a gastar cuota. |
 | `src-tauri`  | Backend Tauri v2 + cliente nativo de YouTube (`youtube.rs`).          |
 | `app`        | Frontend del webview.                                                  |
 | `legacy`     | Script Node original (2021), preservado por historia.                  |
@@ -95,6 +95,8 @@ sin API key. Para datos reales, pegá el ID del canal o video y tu API key.
 
 Reconversión en curso del parser original (Node, 2021) a un sistema de trackeo en
 Rust. Hecho: dominio con tests, **ingesta nativa en Rust** (reqwest, sin sidecar
-Node — la app es distribuible), persistencia local (SQLite) lista, scaffold de la
-app y UI. Pendiente: empaquetar/instalar la app de escritorio (requiere las Build
-Tools de arriba) y cablear el histórico de `sdp-storage` a los comandos.
+Node — la app es distribuible), **persistencia local (SQLite) cableada** a los
+comandos (cada análisis se guarda y `analyze_history` reanaliza sin gastar
+cuota), **topes de cuota configurables** con resultados parciales (F4), scaffold
+de la app y UI. Pendiente: empaquetar/instalar la app de escritorio (requiere las
+Build Tools de arriba) y, opcionalmente, un botón de "ver histórico" en la UI.
