@@ -1,7 +1,7 @@
 "use strict";
 
-// Traduce la forma cruda de `youtube-fast-api` (getAllComments) a la forma
-// que consume el core Rust: { commenters: [...], comments: [...] }.
+// Traduce la forma cruda de un comentario (ver `youtube.js` flattenThread) a la
+// forma que consume el core Rust: { commenters: [...], comments: [...] }.
 //
 // Es función pura (sin red) para poder testearla con fixtures.
 

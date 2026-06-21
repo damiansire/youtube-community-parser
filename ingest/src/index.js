@@ -8,10 +8,11 @@
 //   node src/index.js --channel <channelId>   (todos los videos del canal)
 //
 // La API key sale de la env YOUTUBE_KEY_API (la setea Tauri al spawnear).
-// Emite por stdout un JSON { commenters: [...], comments: [...] } y, ante
-// error, escribe { error } por stderr y termina con código != 0.
+// Emite por stdout SOLO un JSON { commenters: [...], comments: [...] } y, ante
+// error, escribe { error } por stderr y termina con código != 0. (Nada más debe
+// ir a stdout: Rust parsea stdout como JSON.)
 
-const YoutubeClient = require("youtube-fast-api");
+const { commentsForVideo, commentsForChannel } = require("./youtube");
 const { mapComments } = require("./mapper");
 
 function parseArgs(argv) {
@@ -28,20 +29,6 @@ function parseArgs(argv) {
   return args;
 }
 
-async function commentsForVideo(client, videoId) {
-  const raw = await client.getAllComments(videoId);
-  return Array.isArray(raw) ? raw : [];
-}
-
-async function commentsForChannel(client, channelId) {
-  const videoIds = await client.getAllVideosByChannelId(channelId);
-  const all = [];
-  for (const videoId of videoIds) {
-    all.push(...(await commentsForVideo(client, videoId)));
-  }
-  return all;
-}
-
 async function main() {
   const { mode, id } = parseArgs(process.argv.slice(2));
   if (!mode || !id) {
@@ -51,16 +38,15 @@ async function main() {
   const apiKey = process.env.YOUTUBE_KEY_API;
   if (!apiKey) throw new Error("falta YOUTUBE_KEY_API en el entorno");
 
-  const client = new YoutubeClient(apiKey);
   const rawComments =
     mode === "video"
-      ? await commentsForVideo(client, id)
-      : await commentsForChannel(client, id);
+      ? await commentsForVideo(apiKey, id)
+      : await commentsForChannel(apiKey, id);
 
   process.stdout.write(JSON.stringify(mapComments(rawComments)));
 }
 
 main().catch((err) => {
-  process.stderr.write(JSON.stringify({ error: String(err.message || err) }));
+  process.stderr.write(JSON.stringify({ error: String((err && err.message) || err) }));
   process.exit(1);
 });
