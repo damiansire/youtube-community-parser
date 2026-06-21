@@ -11,6 +11,11 @@ description = "Dominio puro del sistema de trackeo de comentarios: modelos y ran
 serde.workspace = true
 chrono.workspace = true
 
+# Solo para tests: round-trip de los modelos serde. El dominio sigue puro
+# (serde_json no entra en el código de producción de la crate).
+[dev-dependencies]
+serde_json.workspace = true
+
 # Bench de medición (Fase 2/F4): main() plano, sin criterion ni deps externas.
 [[bench]]
 name = "ranking_bench"
