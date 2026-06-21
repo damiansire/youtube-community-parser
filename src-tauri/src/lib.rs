@@ -8,9 +8,9 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use sdp_core::{
-    least_active_of, most_active_of, rank_commenters, BenchmarkReport, Comment, Commenter,
-    CommenterStats, CorpusInsights, CostEstimate, CostPolicy, SearchPlan, SeoInput, SeoReport,
-    VideoIdea, VideoMeta,
+    least_active_of, most_active_of, rank_commenters, AiIdea, AiProvider, BenchmarkReport, Comment,
+    Commenter, CommenterStats, CorpusInsights, CostEstimate, CostPolicy, SearchPlan, SeoInput,
+    SeoReport, VideoIdea, VideoMeta,
 };
 use sdp_storage::Store;
 use secrecy::SecretString;
@@ -93,6 +93,10 @@ pub enum CommandError {
     DataDir(String),
     #[error("esta operación requiere confirmación de costo: {0}")]
     NeedsConfirmation(String),
+    #[error("error de la capa de IA: {0}")]
+    Llm(#[from] sdp_llm::LlmError),
+    #[error("no se pudo parsear la respuesta de IA: {0}")]
+    AiParse(#[from] sdp_core::ParseError),
 }
 
 impl serde::Serialize for CommandError {
@@ -309,6 +313,45 @@ async fn mine_ideas(app: tauri::AppHandle) -> Result<Vec<VideoIdea>, CommandErro
     Ok(sdp_core::mine_video_ideas(&comments))
 }
 
+/// Mina las ideas del histórico local (compartido por F7 y la capa de IA F12).
+async fn mined_ideas(app: &tauri::AppHandle) -> Result<Vec<sdp_core::VideoIdea>, CommandError> {
+    let path = db_path(app)?;
+    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
+        let store = Store::open(path)?;
+        store.all_comments()
+    })
+    .await
+    .expect("la tarea de lectura del histórico no debe paniquear")?;
+    Ok(sdp_core::mine_video_ideas(&comments))
+}
+
+/// Estima el costo EN DINERO (US$) de refinar las ideas con IA (F12). Gratis: solo calcula.
+#[tauri::command]
+async fn estimate_ideas_ai(
+    app: tauri::AppHandle,
+    provider: AiProvider,
+) -> Result<CostEstimate, CommandError> {
+    let ideas = mined_ideas(&app).await?;
+    Ok(sdp_core::estimate_ideas_ai(provider, &ideas))
+}
+
+/// Refina las ideas con IA (F12) TRAS pasar el gate de costo en US$. Inyecta el
+/// adaptador concreto según `provider`; la key vive lo justo (SecretString).
+#[tauri::command]
+async fn refine_ideas_ai(
+    app: tauri::AppHandle,
+    provider: AiProvider,
+    api_key: String,
+    confirmed: bool,
+) -> Result<Vec<AiIdea>, CommandError> {
+    let ideas = mined_ideas(&app).await?;
+    ensure_confirmed(&sdp_core::estimate_ideas_ai(provider, &ideas), confirmed)?;
+    let prompt = sdp_core::build_ideas_prompt(&ideas);
+    let client = sdp_llm::build_provider(provider, SecretString::from(api_key), None)?;
+    let raw = client.enhance(&prompt).await?;
+    Ok(sdp_core::parse_ideas_response(&raw)?)
+}
+
 /// Audita el SEO de un texto candidato (F8) cruzándolo con las keywords que
 /// demanda la comunidad (del histórico local). Costo 0, sin red.
 #[tauri::command]
@@ -416,6 +459,8 @@ pub fn run() {
             analyze_history,
             analyze_corpus,
             mine_ideas,
+            estimate_ideas_ai,
+            refine_ideas_ai,
             audit_seo,
             estimate_video_meta,
             fetch_video_meta,

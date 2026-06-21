@@ -26,6 +26,7 @@ secrecy.workspace = true
 urlencoding.workspace = true
 sdp-core = { path = "../crates/core" }
 sdp-storage = { path = "../crates/storage" }
+sdp-llm = { path = "../crates/llm" }
 
 [dev-dependencies]
 # Servidor HTTP mockeado para testear el cliente de YouTube sin red ni API key.
