@@ -47,6 +47,8 @@ impl Analysis {
 pub enum CommandError {
     #[error(transparent)]
     Ingest(#[from] ingest::IngestError),
+    #[error("la tarea de ingesta se interrumpió: {0}")]
+    Join(String),
 }
 
 impl serde::Serialize for CommandError {
@@ -114,23 +116,29 @@ fn analyze_demo() -> Analysis {
     Analysis::build(&comments, &commenters, 3)
 }
 
-// TODO(async): estos comandos son `async fn` pero `ingest::video`/`ingest::channel`
-// usan `std::process::Command::output()` (bloqueante) por dentro, lo que bloquea un
-// worker de Tokio y congela la UI mientras corre Node + red. Envolver la llamada en
-// `tokio::task::spawn_blocking(...)` (o migrar `ingest::run` a `tokio::process::Command`
-// + `.output().await`). Pendiente de verificar con build de `src-tauri`.
-
 /// Analiza los comentarios de un video real vía el sidecar de YouTube.
+///
+/// `ingest::video` es bloqueante (`std::process::Command::output()` + Node +
+/// red), así que se ejecuta en `spawn_blocking` para no congelar el worker de
+/// Tokio que atiende este comando.
 #[tauri::command]
 async fn analyze_video(video_id: String, api_key: String) -> Result<Analysis, CommandError> {
-    let data = ingest::video(&video_id, &api_key)?;
+    let data = tauri::async_runtime::spawn_blocking(move || ingest::video(&video_id, &api_key))
+        .await
+        .map_err(|e| CommandError::Join(e.to_string()))??;
     Ok(Analysis::build(&data.comments, &data.commenters, 5))
 }
 
 /// Analiza todos los comentarios de un canal real vía el sidecar de YouTube.
+///
+/// Igual que `analyze_video`: la ingesta es bloqueante y corre en
+/// `spawn_blocking` para no bloquear el runtime.
 #[tauri::command]
 async fn analyze_channel(channel_id: String, api_key: String) -> Result<Analysis, CommandError> {
-    let data = ingest::channel(&channel_id, &api_key)?;
+    let data =
+        tauri::async_runtime::spawn_blocking(move || ingest::channel(&channel_id, &api_key))
+            .await
+            .map_err(|e| CommandError::Join(e.to_string()))??;
     Ok(Analysis::build(&data.comments, &data.commenters, 5))
 }
 
