@@ -7,6 +7,7 @@ mod youtube;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use confirm::{ConfirmError, ConfirmStore, OpFingerprint};
 use sdp_core::{
@@ -244,35 +245,56 @@ fn client(api_key: String) -> Result<YoutubeClient, CommandError> {
     Ok(YoutubeClient::new(SecretString::from(api_key))?)
 }
 
-/// Ruta del archivo SQLite del histórico, dentro del directorio de datos de la
-/// app (resuelto por Tauri, nunca hardcodeado).
+/// Conexión SQLite **compartida y reutilizable** (auditoría P9), guardada en
+/// `tauri::State`. Antes cada comando hacía `Store::open(path)`, re-ejecutando el
+/// DDL (`CREATE TABLE/INDEX IF NOT EXISTS`) en cada apertura y sin reusar la
+/// conexión. Ahora se abre **una sola vez** al arranque (DDL + PRAGMAs WAL una
+/// vez) y cada comando la reusa.
 ///
-/// `create_dir_all` es I/O bloqueante: se corre con `tokio::fs` para no trabar el
-/// executor de Tokio en cada comando (auditoría P9).
-async fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| CommandError::DataDir(e.to_string()))?;
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| CommandError::DataDir(e.to_string()))?;
-    Ok(dir.join("history.sqlite3"))
+/// rusqlite es bloqueante y `Connection` no es `Sync`, así que se envuelve en
+/// `Arc<Mutex<Store>>`: el `Arc` se clona barato para cruzar a `spawn_blocking`
+/// (la rama bloqueante, fuera del executor de Tokio) y ahí se toma el lock.
+#[derive(Clone)]
+pub struct Db(Arc<Mutex<Store>>);
+
+impl Db {
+    /// Abre la base en `path` una vez (corre DDL + PRAGMAs) y la deja lista para
+    /// compartir. Se llama en el `setup` de Tauri, no por comando.
+    fn open(path: PathBuf) -> Result<Self, sdp_storage::StoreError> {
+        Ok(Db(Arc::new(Mutex::new(Store::open(path)?))))
+    }
+
+    /// Clona el handle compartido (solo el `Arc`, no la conexión).
+    fn handle(&self) -> Arc<Mutex<Store>> {
+        Arc::clone(&self.0)
+    }
+}
+
+/// Ejecuta `f` sobre el `Store` compartido dentro de `spawn_blocking` (rusqlite
+/// es bloqueante). Toma el handle del `State`, lo mueve a la tarea y ahí toma el
+/// lock. Centraliza el manejo del `JoinError` (tipado, no panic) y del `PoisonError`
+/// del mutex (auditoría P9/P10).
+async fn with_store<T, F>(app: &tauri::AppHandle, f: F) -> Result<T, CommandError>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Store) -> Result<T, sdp_storage::StoreError> + Send + 'static,
+{
+    let db = app.state::<Db>().handle();
+    tokio::task::spawn_blocking(move || -> Result<T, CommandError> {
+        let mut store = db
+            .lock()
+            .map_err(|_| CommandError::Task("la conexión a la base quedó envenenada".into()))?;
+        Ok(f(&mut store)?)
+    })
+    .await
+    .map_err(join_err)?
 }
 
 /// Lee todos los comentarios del histórico local (SQLite). Encapsula el patrón
-/// `db_path → spawn_blocking(Store::open + all_comments)` que estaba copiado en 6
-/// comandos, y mapea el `JoinError` a un `CommandError` tipado en vez de
-/// paniquear (auditoría P10).
+/// que estaba copiado en 6 comandos, reusando la conexión compartida (auditoría
+/// P9/P10) y mapeando el `JoinError` a un `CommandError` tipado en vez de paniquear.
 async fn read_comments(app: &tauri::AppHandle) -> Result<Vec<Comment>, CommandError> {
-    let path = db_path(app).await?;
-    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-        let store = Store::open(path)?;
-        store.all_comments()
-    })
-    .await
-    .map_err(join_err)??;
-    Ok(comments)
+    with_store(app, |store| store.all_comments()).await
 }
 
 /// Persiste una ingesta en el histórico local (F3: cablear `sdp-storage`).
@@ -282,18 +304,14 @@ async fn read_comments(app: &tauri::AppHandle) -> Result<Vec<Comment>, CommandEr
 /// analizar el mismo canal no duplica, actualiza. Guardar el histórico permite
 /// luego analizar la evolución **sin volver a gastar cuota** (`analyze_history`).
 async fn persist(app: &tauri::AppHandle, data: &Ingested) -> Result<(), CommandError> {
-    let path = db_path(app).await?;
     let comments = data.comments.clone();
     let commenters = data.commenters.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), sdp_storage::StoreError> {
-        let mut store = Store::open(path)?;
+    with_store(app, move |store| {
         store.save_commenters(&commenters)?;
         store.save_comments(&comments)?;
         Ok(())
     })
     .await
-    .map_err(join_err)??;
-    Ok(())
 }
 
 /// Analiza los comentarios de un video real vía el cliente nativo de YouTube.
@@ -336,14 +354,10 @@ async fn analyze_channel(
 /// de la comunidad reusando lo ya ingerido en sesiones anteriores.
 #[tauri::command]
 async fn analyze_history(app: tauri::AppHandle) -> Result<Analysis, CommandError> {
-    let path = db_path(&app).await?;
-    let (comments, commenters) =
-        tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-            let store = Store::open(path)?;
-            Ok((store.all_comments()?, store.all_commenters()?))
-        })
-        .await
-        .map_err(join_err)??;
+    let (comments, commenters) = with_store(&app, |store| {
+        Ok((store.all_comments()?, store.all_commenters()?))
+    })
+    .await?;
     Ok(Analysis::build(&comments, &commenters, 5))
 }
 
@@ -353,16 +367,8 @@ async fn persist_video_meta(
     app: &tauri::AppHandle,
     videos: &[VideoMeta],
 ) -> Result<(), CommandError> {
-    let path = db_path(app).await?;
     let videos = videos.to_vec();
-    tokio::task::spawn_blocking(move || -> Result<(), sdp_storage::StoreError> {
-        let mut store = Store::open(path)?;
-        store.save_video_meta(&videos)?;
-        Ok(())
-    })
-    .await
-    .map_err(join_err)??;
-    Ok(())
+    with_store(app, move |store| store.save_video_meta(&videos)).await
 }
 
 /// Mina el **histórico local** (SQLite) para extraer keywords y temas recurrentes
@@ -576,14 +582,10 @@ async fn benchmark_channels(
     my_id: String,
     competitor_ids: Vec<String>,
 ) -> Result<BenchmarkReport, CommandError> {
-    let path = db_path(&app).await?;
-    let (videos, comments) =
-        tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-            let store = Store::open(path)?;
-            Ok((store.all_video_meta()?, store.all_comments()?))
-        })
-        .await
-        .map_err(join_err)??;
+    let (videos, comments) = with_store(&app, |store| {
+        Ok((store.all_video_meta()?, store.all_comments()?))
+    })
+    .await?;
 
     // Agrupamos UNA sola vez en O(V+C) en lugar de re-escanear y clonar TODO el
     // histórico por cada canal (era O((1+M)·(V+C)) con clones completos, P7):
@@ -624,10 +626,25 @@ async fn benchmark_channels(
     Ok(sdp_core::benchmark(mine, competitors))
 }
 
+/// Resuelve la ruta del SQLite y abre la conexión compartida UNA vez al arranque
+/// (auditoría P9). El `create_dir_all` bloqueante acá es aceptable: corre una sola
+/// vez en el `setup`, no por comando dentro del executor de Tokio.
+fn init_db(app: &tauri::AppHandle) -> Result<Db, Box<dyn std::error::Error>> {
+    let dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(Db::open(dir.join("history.sqlite3"))?)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(ConfirmStore::new())
+        .setup(|app| {
+            // Conexión SQLite compartida (P9): se abre una vez y se guarda en State.
+            let db = init_db(app.handle())?;
+            app.manage(db);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             analyze_demo,
             analyze_video,

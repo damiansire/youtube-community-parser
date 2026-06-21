@@ -39,6 +39,15 @@ impl Store {
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
+        // PRAGMAs de rendimiento (auditoría P9): WAL deja que lecturas y escrituras
+        // no se bloqueen entre sí (en rollback-journal cada escritura hacía fsync y
+        // trababa las lecturas); `synchronous=NORMAL` es seguro bajo WAL y evita un
+        // fsync por transacción. Se corren una sola vez al abrir, junto con el DDL.
+        //
+        // En bases `:memory:` el WAL no aplica (no hay archivo), pero el pragma es
+        // inocuo: SQLite lo ignora y queda en `memory`.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS commenter (
                 channel_id        TEXT PRIMARY KEY,
@@ -69,6 +78,14 @@ impl Store {
             );",
         )?;
         Ok(Store { conn })
+    }
+
+    /// Modo de journal activo (`"wal"`, `"memory"`, …). Se expone para verificar
+    /// en tests que `open` activó WAL en una base de archivo (auditoría P9).
+    pub fn journal_mode(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))?)
     }
 
     /// Inserta o actualiza comentaristas (idempotente por `channel_id`).
@@ -358,6 +375,39 @@ mod tests {
         let metas = store.all_video_meta().unwrap();
         assert_eq!(metas.len(), 1, "mismo id no duplica");
         assert_eq!(metas[0].view_count, Some(999), "actualiza el valor");
+    }
+
+    #[test]
+    fn open_en_archivo_activa_wal() {
+        // P9: una base de archivo debe quedar en WAL (lecturas/escrituras sin
+        // bloquearse mutuamente). Usamos un archivo temporal único y lo limpiamos.
+        let mut path = std::env::temp_dir();
+        let unique = format!(
+            "sdp-wal-test-{}-{:?}.sqlite3",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        path.push(unique);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.journal_mode().unwrap().to_lowercase(),
+            "wal",
+            "open() en archivo debe activar WAL"
+        );
+        drop(store);
+
+        // Limpieza best-effort del .sqlite3 y sus sidecars -wal/-shm.
+        let _ = std::fs::remove_file(&path);
+        for suffix in ["-wal", "-shm"] {
+            let mut side = path.clone();
+            let name = format!("{}{suffix}", path.file_name().unwrap().to_string_lossy());
+            side.set_file_name(name);
+            let _ = std::fs::remove_file(side);
+        }
     }
 
     #[test]
