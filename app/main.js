@@ -182,6 +182,10 @@ const tools = {
   videosOut: $("videos-out"),
   ideasRun: $("ideas-run"),
   ideasOut: $("ideas-out"),
+  ideasRefine: $("ideas-refine"),
+  aiProvider: $("ai-provider"),
+  aiKey: $("ai-key"),
+  aiIdeasOut: $("ai-ideas-out"),
   modal: $("cost-modal"),
   costSummary: $("cost-summary"),
   costBreakdown: $("cost-breakdown"),
@@ -339,9 +343,7 @@ function ideaItem(idea) {
       <span class="idea-tag idea-tag--${sig.mod}">${sig.label}</span>
     </header>
     <p class="idea__meta" title="Score: relevancia estimada de la señal (mayor = más fuerte).">Score ${idea.score} · ${n} comentario${n === 1 ? "" : "s"} de respaldo</p>
-    ${quotes}
-    <button class="btn btn--ghost idea__refine" type="button" disabled
-      title="Se activa en una próxima versión: refina la idea con IA.">Refinar con IA</button>`;
+    ${quotes}`;
   return li;
 }
 
@@ -368,6 +370,60 @@ async function mineIdeas() {
     setStatus(String(err), "error");
   } finally {
     tools.ideasRun.disabled = false;
+  }
+}
+
+// ---------- Refinar ideas con IA (F12: operación cara, factura en US$) ----------
+
+// Una tarjeta de idea refinada: title destacado, hook como cita, rationale como
+// cuerpo, y un badge "IA · {provider}". title/hook/rationale vienen del modelo
+// (datos no confiables): escapeHtml obligatorio en los tres.
+function aiIdeaItem(idea, provider) {
+  const li = document.createElement("li");
+  li.className = "ai-idea";
+  li.innerHTML = `
+    <header class="ai-idea__head">
+      <h4 class="ai-idea__title">${escapeHtml(idea.title)}</h4>
+      <span class="ai-idea__badge">IA · ${escapeHtml(provider)}</span>
+    </header>
+    <blockquote class="ai-idea__hook">${escapeHtml(idea.hook)}</blockquote>
+    <p class="ai-idea__rationale">${escapeHtml(idea.rationale)}</p>`;
+  return li;
+}
+
+function renderAiIdeas(ideas, provider) {
+  tools.aiIdeasOut.innerHTML = "";
+  ideas.forEach((idea) => tools.aiIdeasOut.appendChild(aiIdeaItem(idea, provider)));
+  tools.aiIdeasOut.hidden = ideas.length === 0;
+}
+
+async function refineIdeasAi() {
+  const provider = tools.aiProvider.value;
+  const apiKey = tools.aiKey.value.trim();
+  if (!apiKey) return setStatus("Pegá la key del proveedor de IA.", "error");
+
+  tools.ideasRefine.disabled = true;
+  try {
+    // estimar -> confirmar -> ejecutar. El modal ya muestra "~US$X" para Money.
+    const estimate = await invoke("estimate_ideas_ai", { provider });
+    if (!(await confirmCost(estimate))) {
+      setStatus("Cancelado: no se gastó dinero.");
+      return;
+    }
+    setStatus("Refinando con IA…");
+    const refined = await invoke("refine_ideas_ai", { provider, apiKey, confirmed: true });
+    if (!refined.length) {
+      setStatus("La IA no devolvió ideas; generá ideas heurísticas primero.", "error");
+      tools.aiIdeasOut.hidden = true;
+      return;
+    }
+    renderAiIdeas(refined, provider);
+    setStatus(`${refined.length} idea${refined.length === 1 ? "" : "s"} refinada${refined.length === 1 ? "" : "s"} con IA.`);
+  } catch (err) {
+    setStatus(String(err), "error");
+  } finally {
+    // Vuelve al estado según haya key (no re-habilita a ciegas si la vaciaron).
+    syncRefineEnabled();
   }
 }
 
@@ -643,6 +699,14 @@ els.demo.addEventListener("click", analyzeDemo);
 tools.corpusRun.addEventListener("click", analyzeCorpus);
 tools.metaRun.addEventListener("click", fetchMeta);
 tools.ideasRun.addEventListener("click", mineIdeas);
+tools.ideasRefine.addEventListener("click", refineIdeasAi);
+// El refinado cuesta US$: el botón arranca apagado y se habilita solo cuando hay
+// key cargada, para que el estado inicial invite a completar antes de gastar.
+const syncRefineEnabled = () => {
+  if (invoke) tools.ideasRefine.disabled = tools.aiKey.value.trim() === "";
+};
+tools.aiKey.addEventListener("input", syncRefineEnabled);
+syncRefineEnabled();
 seo.run.addEventListener("click", auditSeo);
 bench.run.addEventListener("click", runBenchmark);
 search.run.addEventListener("click", runSearch);
@@ -656,6 +720,7 @@ if (!invoke) {
   tools.corpusRun.disabled = true;
   tools.metaRun.disabled = true;
   tools.ideasRun.disabled = true;
+  tools.ideasRefine.disabled = true;
   seo.run.disabled = true;
   bench.run.disabled = true;
   search.run.disabled = true;

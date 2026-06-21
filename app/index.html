@@ -145,7 +145,8 @@
 
           <!-- Ideas de video (F7): mina señales del histórico local (preguntas,
                pedidos, temas recurrentes) y propone semillas de título. Gratis:
-               usa lo ya analizado. El refinado con IA llega en F12. -->
+               usa lo ya analizado. El refinado con IA (F12) re-mina el histórico
+               y devuelve ideas pulidas: cuesta US$ y pasa por el gate de costo. -->
           <article class="tool tool--wide">
             <header class="tool__head">
               <h3 class="tool__name">Ideas de video</h3>
@@ -155,6 +156,34 @@
               comunidad pregunta, pide y repite. Sin costo: usa el histórico local.</p>
             <button id="ideas-run" class="btn" type="button">Generar ideas</button>
             <ul id="ideas-out" class="ideas" hidden></ul>
+
+            <!-- Refinar con IA (F12): refina TODAS las ideas de una (el backend
+                 re-mina el histórico), por eso es un panel global, no un botón por
+                 idea. La key vive solo en el input password. Cuesta US$. -->
+            <div class="ai-panel">
+              <div class="ai-panel__head">
+                <h4 class="corpus__sub">Refinar con IA</h4>
+                <span class="tag tag--cost">cuesta US$</span>
+              </div>
+              <p class="cost-note">Caro: usa un modelo de IA (se factura en
+                dólares). Vas a ver el costo y confirmar antes de gastar.</p>
+              <div class="ai-panel__row">
+                <div class="field">
+                  <label for="ai-provider">Proveedor de IA</label>
+                  <select id="ai-provider">
+                    <option value="Anthropic">Anthropic (Claude)</option>
+                    <option value="Gemini">Google Gemini</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="ai-key">Key del proveedor de IA</label>
+                  <input id="ai-key" type="password" placeholder="Necesaria para refinar"
+                    autocomplete="off" spellcheck="false" />
+                </div>
+              </div>
+              <button id="ideas-refine" class="btn" type="button">Refinar con IA</button>
+              <ul id="ai-ideas-out" class="ai-ideas" hidden></ul>
+            </div>
           </article>
 
           <!-- SEO de tu texto (F8): audita título, tags y descripción contra

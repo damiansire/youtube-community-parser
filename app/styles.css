@@ -253,8 +253,55 @@ body {
   margin: 0; padding: 6px 0 6px 12px; border-left: 2px solid var(--line);
   font-size: 13px; line-height: 1.5; color: var(--ink); font-style: italic;
 }
-.idea__refine { align-self: flex-start; padding: 7px 14px; font-size: 13px; margin-top: 2px; }
-.idea__refine:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* ---------- refinar ideas con IA (F12) ---------- */
+/* Variante de costo del badge: mismo dorado que la banda .cost-note, para que
+   "cuesta US$" lea como zona de gasto y no como un realce suelto. */
+.tag--cost { background: var(--gold-soft); color: #8a5600; }
+
+/* Panel de IA: bloque propio dentro de la tarjeta de ideas, separado por una
+   línea para marcar que es la acción cara (re-mina + modelo). */
+.ai-panel {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line);
+}
+.ai-panel__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ai-panel__head .corpus__sub { margin: 0; }
+.ai-panel__row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end; }
+.ai-panel .btn { align-self: flex-start; }
+
+/* El select de proveedor reusa el look de .field input (no estaba cubierto). */
+.field select {
+  font: inherit; font-size: 14px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: #fbfbfe;
+  color: var(--ink); cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.field select:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Ideas refinadas: tarjetas con realce de IA (acento índigo a la izquierda),
+   título destacado, hook como cita y rationale como cuerpo. */
+.ai-ideas { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.ai-idea {
+  display: flex; flex-direction: column; gap: 8px; padding: 14px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 12px; background: var(--accent-soft);
+}
+.ai-idea__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.ai-idea__title { margin: 0; font-size: 14.5px; font-weight: 700; line-height: 1.35; letter-spacing: -0.01em; }
+/* Badge "IA · {provider}": misma forma de píldora que .tag, en acento pleno. */
+.ai-idea__badge {
+  flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+  background: var(--accent); color: #fff;
+}
+.ai-idea__hook {
+  margin: 0; padding: 6px 0 6px 12px; border-left: 2px solid var(--accent);
+  font-size: 13px; line-height: 1.5; color: var(--ink); font-style: italic;
+}
+.ai-idea__rationale { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--muted); }
 
 /* ---------- SEO de tu texto (F8) ---------- */
 /* La descripción es textarea: mismo look que .field input + resize vertical. */
@@ -388,6 +435,7 @@ body {
   .rosters { grid-template-columns: 1fr; }
   .tools__grid { grid-template-columns: 1fr; }
   .bench-row { grid-template-columns: 1fr; }
+  .ai-panel__row { grid-template-columns: 1fr; }
   .stage { padding: 28px 20px; }
 }
 
