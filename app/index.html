@@ -103,7 +103,136 @@
             </table>
           </section>
         </section>
+
+        <!-- Herramientas de creador (F6/F9): minan el histórico local y traen
+             metadata real. Lo caro pasa por el gate de costo (confirmCost). -->
+        <section id="tools" class="tools">
+          <h2 class="tools__title">Herramientas de creador</h2>
+          <div class="tools__grid">
+            <article class="tool">
+              <header class="tool__head">
+                <h3 class="tool__name">Temas de la comunidad</h3>
+                <span class="tag tag--free">gratis</span>
+              </header>
+              <p class="tool__desc">Keywords y temas recurrentes de lo que tu
+                comunidad ya comentó. Sin costo: usa el histórico local.</p>
+              <button id="corpus-run" class="btn" type="button">Analizar temas</button>
+              <div id="corpus-out" class="corpus" hidden>
+                <h4 class="corpus__sub">Keywords demandadas</h4>
+                <div id="keywords" class="cloud"></div>
+                <p class="cloud__hint">Más grande = más mencionado.</p>
+                <h4 class="corpus__sub">Temas recurrentes</h4>
+                <ul id="topics" class="topics"></ul>
+              </div>
+            </article>
+
+            <article class="tool">
+              <header class="tool__head">
+                <h3 class="tool__name">Metadata de mis videos</h3>
+                <span class="tag tag--quota">cuota</span>
+              </header>
+              <p class="tool__desc">Trae título, tags y estadísticas reales de tus
+                videos (1 unidad cada 50 ids). Te mostramos el costo antes.</p>
+              <div class="field">
+                <label for="video-ids">IDs de video (coma o espacio)</label>
+                <input id="video-ids" type="text" placeholder="dQw4w9WgXcQ, 9bZkp7q19f0"
+                  autocomplete="off" spellcheck="false" />
+              </div>
+              <button id="meta-run" class="btn" type="button">Traer metadata</button>
+              <ul id="videos-out" class="videos" hidden></ul>
+            </article>
+          </div>
+
+          <!-- Ideas de video (F7): mina señales del histórico local (preguntas,
+               pedidos, temas recurrentes) y propone semillas de título. Gratis:
+               usa lo ya analizado. El refinado con IA llega en F12. -->
+          <article class="tool tool--wide">
+            <header class="tool__head">
+              <h3 class="tool__name">Ideas de video</h3>
+              <span class="tag tag--free">gratis</span>
+            </header>
+            <p class="tool__desc">Semillas de título a partir de lo que tu
+              comunidad pregunta, pide y repite. Sin costo: usa el histórico local.</p>
+            <button id="ideas-run" class="btn" type="button">Generar ideas</button>
+            <ul id="ideas-out" class="ideas" hidden></ul>
+          </article>
+
+          <!-- SEO de tu texto (F8): audita título, tags y descripción contra
+               buenas prácticas + las keywords que tu comunidad ya demanda.
+               Gratis: corre local. El sugeridor con IA llega en F12. -->
+          <article class="tool tool--wide">
+            <header class="tool__head">
+              <h3 class="tool__name">SEO de tu texto</h3>
+              <span class="tag tag--free">gratis</span>
+            </header>
+            <p class="tool__desc">Pegá el título, los tags y la descripción de tu
+              video y te decimos qué mejorar. Sin costo: corre local.</p>
+            <div class="field">
+              <label for="seo-title">Título</label>
+              <input id="seo-title" type="text" placeholder="Cómo dominar Angular signals en 2026"
+                autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="seo-tags">Tags (coma o espacio)</label>
+              <input id="seo-tags" type="text" placeholder="angular, signals, tutorial"
+                autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="seo-desc">Descripción</label>
+              <textarea id="seo-desc" rows="4" placeholder="De qué trata el video, links, capítulos…"
+                autocomplete="off" spellcheck="false"></textarea>
+            </div>
+            <div class="seo-actions">
+              <button id="seo-run" class="btn" type="button">Auditar SEO</button>
+              <button id="seo-suggest" class="btn btn--ghost" type="button" disabled
+                title="Se activa en una próxima versión: sugiere mejoras con IA.">Sugerir con IA</button>
+            </div>
+            <div id="seo-out" class="seo" hidden></div>
+          </article>
+
+          <article class="tool tool--wide">
+            <header class="tool__head">
+              <h3 class="tool__name">Buscar videos / trending</h3>
+              <span class="tag tag--quota">100u / página</span>
+            </header>
+            <p class="tool__desc">Descubrí videos y competidores por término de
+              búsqueda. Útil para ver qué hace la competencia o qué está en tendencia.</p>
+            <p id="search-cost" class="cost-note">Caro: 100 unidades de cuota
+              (1 página). Vas a ver el costo y confirmar antes de gastar.</p>
+            <div class="search-row">
+              <div class="field">
+                <label for="search-q">Término de búsqueda</label>
+                <input id="search-q" type="text" placeholder="angular signals"
+                  autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="search-pages">Páginas</label>
+                <input id="search-pages" type="number" min="1" max="10" value="1" />
+              </div>
+            </div>
+            <label class="check">
+              <input id="search-trending" type="checkbox" />
+              <span>Ordenar por más vistos (trending)</span>
+            </label>
+            <button id="search-run" class="btn" type="button">Buscar</button>
+            <ul id="search-out" class="videos" hidden></ul>
+          </article>
+        </section>
       </main>
+    </div>
+
+    <!-- Gate de costo: modal que muestra el costo estimado antes de ejecutar
+         una operación cara (F9/F10). La key vive solo en el input password. -->
+    <div id="cost-modal" class="modal" hidden>
+      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="cost-title">
+        <h3 id="cost-title" class="modal__title">¿Continuar?</h3>
+        <p id="cost-summary" class="modal__summary"></p>
+        <ul id="cost-breakdown" class="modal__lines"></ul>
+        <div class="modal__actions">
+          <button id="cost-cancel" class="btn btn--ghost" type="button">Cancelar</button>
+          <button id="cost-confirm" class="btn" type="button">Continuar</button>
+        </div>
+      </div>
     </div>
 
     <script src="main.js"></script>
