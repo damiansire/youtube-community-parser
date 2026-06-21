@@ -20,12 +20,24 @@ pub struct Analysis {
 
 impl Analysis {
     fn build(comments: &[Comment], commenters: &[Commenter], extremes: usize) -> Self {
+        let top = most_active(comments, commenters, extremes);
+        // `least_active` devuelve la cola del mismo ranking, que se solapa con
+        // `top` cuando hay <= 2*extremes comentaristas (la misma persona saldría
+        // como "de las que más" y "de las que menos" a la vez). Excluimos del
+        // tramo inferior a quienes ya están en el tope.
+        let top_ids: std::collections::HashSet<&str> =
+            top.iter().map(|s| s.channel_id.as_str()).collect();
+        let bottom = least_active(comments, commenters, extremes)
+            .into_iter()
+            .filter(|s| !top_ids.contains(s.channel_id.as_str()))
+            .collect();
+
         Analysis {
             total_comments: comments.len(),
             total_commenters: commenters.len(),
             ranking: rank_commenters(comments, commenters),
-            top: most_active(comments, commenters, extremes),
-            bottom: least_active(comments, commenters, extremes),
+            top,
+            bottom,
         }
     }
 }
