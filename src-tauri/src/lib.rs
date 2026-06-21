@@ -8,12 +8,14 @@ use std::path::PathBuf;
 
 use sdp_core::{
     least_active_of, most_active_of, rank_commenters, Comment, Commenter, CommenterStats,
+    CorpusInsights, CostEstimate, CostPolicy, SearchPlan, SeoInput, SeoReport, VideoIdea,
+    VideoMeta,
 };
 use sdp_storage::Store;
 use secrecy::SecretString;
 use serde::Serialize;
 use tauri::Manager;
-use youtube::{Ingested, IngestLimits, YoutubeClient};
+use youtube::{IngestLimits, Ingested, SearchResults, YoutubeClient};
 
 /// Tope por defecto de la ingesta de un canal (F4): evita agotar la cuota
 /// diaria (10k u/día) en un canal enorme. Un canal mediano cabe holgado; si se
@@ -88,6 +90,8 @@ pub enum CommandError {
     Storage(#[from] sdp_storage::StoreError),
     #[error("no se pudo resolver el directorio de datos de la app: {0}")]
     DataDir(String),
+    #[error("esta operación requiere confirmación de costo: {0}")]
+    NeedsConfirmation(String),
 }
 
 impl serde::Serialize for CommandError {
@@ -244,6 +248,124 @@ async fn analyze_history(app: tauri::AppHandle) -> Result<Analysis, CommandError
     Ok(Analysis::build(&comments, &commenters, 5))
 }
 
+/// Persiste metadata de videos en el histórico local (F9). Mismo patrón que
+/// [`persist`]: rusqlite es bloqueante, va en `spawn_blocking`; upsert idempotente.
+async fn persist_video_meta(
+    app: &tauri::AppHandle,
+    videos: &[VideoMeta],
+) -> Result<(), CommandError> {
+    let path = db_path(app)?;
+    let videos = videos.to_vec();
+    tokio::task::spawn_blocking(move || -> Result<(), sdp_storage::StoreError> {
+        let mut store = Store::open(path)?;
+        store.save_video_meta(&videos)?;
+        Ok(())
+    })
+    .await
+    .expect("la tarea de persistencia no debe paniquear")?;
+    Ok(())
+}
+
+/// Gate de costo **server-side** (principio transversal, F6): si la operación
+/// supera el umbral de la política y el usuario no confirmó, se rechaza ANTES de
+/// gastar cuota. Re-calcula con el estimate recibido — no confía en el front.
+fn ensure_confirmed(estimate: &CostEstimate, confirmed: bool) -> Result<(), CommandError> {
+    if !confirmed && sdp_core::needs_optin(estimate, &CostPolicy::default()) {
+        return Err(CommandError::NeedsConfirmation(format!(
+            "{:?}; volvé a llamar con confirmed = true tras mostrar el modal",
+            estimate.kind
+        )));
+    }
+    Ok(())
+}
+
+/// Mina el **histórico local** (SQLite) para extraer keywords y temas recurrentes
+/// de la comunidad (F6). Costo 0: trabaja sobre lo ya persistido, sin red.
+#[tauri::command]
+async fn analyze_corpus(app: tauri::AppHandle) -> Result<CorpusInsights, CommandError> {
+    let path = db_path(&app)?;
+    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
+        let store = Store::open(path)?;
+        store.all_comments()
+    })
+    .await
+    .expect("la tarea de lectura del histórico no debe paniquear")?;
+    let texts: Vec<String> = comments.into_iter().map(|c| c.text).collect();
+    Ok(sdp_core::corpus_insights(&texts))
+}
+
+/// Mina ideas de video desde el histórico local (F7): preguntas, pedidos y temas
+/// recurrentes de la comunidad. Costo 0, sin red.
+#[tauri::command]
+async fn mine_ideas(app: tauri::AppHandle) -> Result<Vec<VideoIdea>, CommandError> {
+    let path = db_path(&app)?;
+    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
+        let store = Store::open(path)?;
+        store.all_comments()
+    })
+    .await
+    .expect("la tarea de lectura del histórico no debe paniquear")?;
+    Ok(sdp_core::mine_video_ideas(&comments))
+}
+
+/// Audita el SEO de un texto candidato (F8) cruzándolo con las keywords que
+/// demanda la comunidad (del histórico local). Costo 0, sin red.
+#[tauri::command]
+async fn audit_seo(app: tauri::AppHandle, input: SeoInput) -> Result<SeoReport, CommandError> {
+    let path = db_path(&app)?;
+    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
+        let store = Store::open(path)?;
+        store.all_comments()
+    })
+    .await
+    .expect("la tarea de lectura del histórico no debe paniquear")?;
+    let texts: Vec<String> = comments.into_iter().map(|c| c.text).collect();
+    let corpus = sdp_core::corpus_insights(&texts);
+    Ok(sdp_core::audit_seo(&input, &corpus))
+}
+
+/// Estima el costo de traer la metadata de `ids` videos (F9). Gratis: solo
+/// calcula (`ceil(n/50)` unidades). La UI lo muestra antes de `fetch_video_meta`.
+#[tauri::command]
+fn estimate_video_meta(ids: Vec<String>) -> CostEstimate {
+    sdp_core::cost::estimate_video_meta(ids.len())
+}
+
+/// Trae la metadata de videos (F9) **tras pasar el gate de costo** y la persiste.
+/// Re-estima server-side; sin `confirmed` cuando hay costo, no ejecuta.
+#[tauri::command]
+async fn fetch_video_meta(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+    api_key: String,
+    confirmed: bool,
+) -> Result<Vec<VideoMeta>, CommandError> {
+    ensure_confirmed(&sdp_core::cost::estimate_video_meta(ids.len()), confirmed)?;
+    let videos = client(api_key)?.fetch_video_meta(&ids).await?;
+    persist_video_meta(&app, &videos).await?;
+    Ok(videos)
+}
+
+/// Estima el costo de una búsqueda (F10): 100 unidades por página. Gratis: solo
+/// calcula. `requires_confirmation` siempre es `true` para cualquier página.
+#[tauri::command]
+fn estimate_search(plan: SearchPlan) -> CostEstimate {
+    sdp_core::cost::estimate_search(plan.max_pages)
+}
+
+/// Ejecuta una búsqueda/trending (F10) **tras pasar el gate de costo** (cara:
+/// 100u/página). Devuelve resultados parciales con `incomplete` si la cuota se
+/// agota a mitad (F4).
+#[tauri::command]
+async fn run_search(
+    plan: SearchPlan,
+    api_key: String,
+    confirmed: bool,
+) -> Result<SearchResults, CommandError> {
+    ensure_confirmed(&sdp_core::cost::estimate_search(plan.max_pages), confirmed)?;
+    Ok(client(api_key)?.search(&plan).await?)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -251,7 +373,14 @@ pub fn run() {
             analyze_demo,
             analyze_video,
             analyze_channel,
-            analyze_history
+            analyze_history,
+            analyze_corpus,
+            mine_ideas,
+            audit_seo,
+            estimate_video_meta,
+            fetch_video_meta,
+            estimate_search,
+            run_search
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la aplicación Tauri");
