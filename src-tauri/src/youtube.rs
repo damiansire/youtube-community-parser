@@ -693,6 +693,102 @@ mod tests {
     }
 }
 
+// Test de INTEGRACIÓN REAL contra la YouTube Data API v3 (red + API key real).
+//
+// Marcado `#[ignore]`: NO corre en `cargo test` normal (gastaría cuota y exige
+// red + key). Se dispara explícito con:
+//
+//   cargo test -p sdp-desktop verifica_fetch_real -- --ignored --nocapture
+//
+// La API key se lee del ENTORNO (`YOUTUBE_KEY_API`), nunca hardcodeada ni
+// logueada. Si la var no está, el test se salta con un mensaje claro (no falla
+// por descuido). Usa un tope chico (`max_comments = 5`) para gastar mínima
+// cuota: una sola unidad de `commentThreads.list` sobre un video estable.
+#[cfg(test)]
+mod real_api_tests {
+    use super::*;
+
+    /// Lee la key del entorno; si no está en el proceso, intenta leerla del
+    /// archivo `.env` del repo (gitignored). Nunca la imprime.
+    fn api_key_from_env() -> Option<String> {
+        if let Ok(k) = std::env::var("YOUTUBE_KEY_API") {
+            if !k.trim().is_empty() {
+                return Some(k.trim().to_string());
+            }
+        }
+        // Fallback: parsear el .env del workspace (un nivel arriba de src-tauri).
+        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.env");
+        let contents = std::fs::read_to_string(env_path).ok()?;
+        for line in contents.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("YOUTUBE_KEY_API=") {
+                let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    #[ignore = "fetch real: requiere red + YOUTUBE_KEY_API (gasta cuota)"]
+    async fn verifica_fetch_real() {
+        let key = match api_key_from_env() {
+            Some(k) => k,
+            None => {
+                eprintln!(
+                    "SALTADO: no se encontró YOUTUBE_KEY_API (ni en el entorno ni en .env)"
+                );
+                return;
+            }
+        };
+
+        let client = YoutubeClient::new(SecretString::from(key))
+            .expect("debe construir el cliente HTTP");
+
+        // Video público estable; tope chico para gastar mínima cuota.
+        let limits = IngestLimits {
+            max_comments: Some(5),
+            ..Default::default()
+        };
+
+        match client.ingest_video_with("dQw4w9WgXcQ", limits).await {
+            Ok(ingested) => {
+                println!("FETCH OK (HTTP 200)");
+                println!("  comentarios traídos: {}", ingested.comments.len());
+                println!("  comentaristas únicos: {}", ingested.commenters.len());
+                println!("  incompleto (por tope): {}", ingested.incomplete);
+                if let Some(r) = &ingested.incomplete_reason {
+                    println!("  motivo: {r}");
+                }
+                if let Some(c) = ingested.comments.first() {
+                    // Snippet de metadata (sin datos sensibles): video_id + autor.
+                    println!("  primer comentario -> video_id={}, autor={}",
+                        c.video_id,
+                        ingested
+                            .commenters
+                            .iter()
+                            .find(|m| m.channel_id == c.author_channel_id)
+                            .map(|m| m.display_name.as_str())
+                            .unwrap_or("?"));
+                }
+                assert!(
+                    !ingested.comments.is_empty(),
+                    "el video debería tener comentarios públicos"
+                );
+            }
+            Err(e) => {
+                // Reporta el error EXACTO de la API (clasificado).
+                eprintln!("FETCH FALLÓ: {e}");
+                eprintln!("  quota_exceeded={} comments_disabled={}",
+                    e.is_quota_exceeded(), e.is_comments_disabled());
+                panic!("fetch real falló: {e}");
+            }
+        }
+    }
+}
+
 // Tests del cliente HTTP contra un servidor mockeado (sin red real, sin API key).
 // Verifican la paginación, los topes (F4) y la resiliencia a cuota end-to-end.
 #[cfg(test)]
