@@ -42,6 +42,17 @@ const initials = (name, id) => {
 
 const displayName = (s) => s.display_name || s.channel_id;
 
+// Escapa texto remoto antes de interpolarlo en innerHTML. Los nombres de canal
+// (display_name/channel_id) son datos de terceros: sin esto, `<img src=...>` o
+// `<style>` se inyectan tal cual.
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
 const fmtDate = (iso) =>
   new Date(iso).toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" });
 
@@ -78,8 +89,8 @@ function rosterRow(s, rank, champ) {
   li.innerHTML = `
     <span class="roster-row__rank">${rank}</span>
     <span class="roster-row__id">
-      <span class="avatar">${initials(s.display_name, s.channel_id)}</span>
-      <span class="roster-row__name">${displayName(s)}</span>
+      <span class="avatar">${escapeHtml(initials(s.display_name, s.channel_id))}</span>
+      <span class="roster-row__name">${escapeHtml(displayName(s))}</span>
     </span>
     <span class="roster-row__count">${s.comment_count}<small>com.</small></span>`;
   return li;
@@ -98,7 +109,7 @@ function renderTable(ranking) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td class="num">${i + 1}</td>
-      <td>${displayName(s)}</td>
+      <td>${escapeHtml(displayName(s))}</td>
       <td class="num">${s.comment_count}</td>
       <td class="num">${s.total_likes}</td>
       <td>${fmtDate(s.last_seen)}</td>`;
