@@ -409,12 +409,27 @@ pub struct SearchResults {
 pub struct YoutubeClient {
     http: reqwest::Client,
     api_key: SecretString,
+    /// Base URL de la API. Configurable (`with_base`) para apuntar los tests a un
+    /// `MockServer` sin tocar red real; en producción es [`API`].
+    base: String,
 }
 
 impl YoutubeClient {
     pub fn new(api_key: SecretString) -> Result<Self, YoutubeError> {
+        Self::with_base(api_key, API.to_string())
+    }
+
+    /// Igual que [`new`] pero con la base URL configurable. Permite que los tests
+    /// con wiremock ejerciten los **métodos de producción** (no una reimplementación
+    /// paralela), incluyendo el armado real de la URL y la clasificación de errores
+    /// (auditoría P3).
+    pub fn with_base(api_key: SecretString, base: String) -> Result<Self, YoutubeError> {
         let http = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
-        Ok(Self { http, api_key })
+        Ok(Self {
+            http,
+            api_key,
+            base,
+        })
     }
 
     /// GET + parseo tipado, clasificando errores de la API (HTTP no-2xx) a
@@ -426,7 +441,11 @@ impl YoutubeClient {
     ) -> Result<T, YoutubeError> {
         // Construimos el query manualmente para incluir la key sin que quede
         // pegada como campo persistente. `encode` evita inyección por id raro.
-        let mut url = format!("{API}/{path}?key={}", urlencoding::encode(self.key()));
+        let mut url = format!(
+            "{}/{path}?key={}",
+            self.base,
+            urlencoding::encode(self.key())
+        );
         for (k, v) in params {
             if !v.is_empty() {
                 url.push('&');
@@ -472,6 +491,13 @@ impl YoutubeClient {
         loop {
             if matches!(max_pages, Some(max) if pages >= max) {
                 return Ok(Some(limit_reason("páginas por video")));
+            }
+            // Corte por presupuesto agotado AL TOPE del loop, antes de pedir otra
+            // página (auditoría P15): si la página anterior dejó budget==0 y hay
+            // nextPageToken, NO gastamos una unidad de cuota extra para una página
+            // que descartaríamos entera en su primer item.
+            if matches!(budget, Some(0)) {
+                return Ok(Some(limit_reason("comentarios")));
             }
             let list: CommentThreadList = self
                 .get(
@@ -1022,27 +1048,15 @@ mod tests {
 mod real_api_tests {
     use super::*;
 
-    /// Lee la key del entorno; si no está en el proceso, intenta leerla del
-    /// archivo `.env` del repo (gitignored). Nunca la imprime.
+    /// Lee la key SOLO del entorno del proceso (`YOUTUBE_KEY_API`). Nunca la
+    /// imprime ni la parsea de un `.env` en disco: un secreto en disco no debe
+    /// cruzar al runtime de tests (auditoría P16). Para correr el test real,
+    /// exportá la var antes (`YOUTUBE_KEY_API=… cargo test … -- --ignored`).
     fn api_key_from_env() -> Option<String> {
-        if let Ok(k) = std::env::var("YOUTUBE_KEY_API") {
-            if !k.trim().is_empty() {
-                return Some(k.trim().to_string());
-            }
-        }
-        // Fallback: parsear el .env del workspace (un nivel arriba de src-tauri).
-        let env_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../.env");
-        let contents = std::fs::read_to_string(env_path).ok()?;
-        for line in contents.lines() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("YOUTUBE_KEY_API=") {
-                let val = rest.trim().trim_matches('"').trim_matches('\'').trim();
-                if !val.is_empty() {
-                    return Some(val.to_string());
-                }
-            }
-        }
-        None
+        std::env::var("YOUTUBE_KEY_API")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
     }
 
     #[tokio::test]
@@ -1107,27 +1121,19 @@ mod real_api_tests {
 }
 
 // Tests del cliente HTTP contra un servidor mockeado (sin red real, sin API key).
-// Verifican la paginación, los topes (F4) y la resiliencia a cuota end-to-end.
+// Ejercitan los **métodos de producción** de `YoutubeClient` vía `with_base`
+// (auditoría P3/P4): paginación, topes (F4) y resiliencia de cuota end-to-end,
+// incluyendo el armado real de la URL y la clasificación de errores.
 #[cfg(test)]
 mod http_tests {
     use super::*;
-    use wiremock::matchers::{path, query_param};
+    use wiremock::matchers::{path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// Cliente apuntado al `MockServer` en lugar de googleapis.
-    fn client_for(base: &str) -> ClientWithBase {
-        ClientWithBase {
-            inner: YoutubeClient::new(SecretString::from("test-key".to_string())).unwrap(),
-            base: base.to_string(),
-        }
-    }
-
-    /// Wrapper de test que reusa la lógica pública pero contra un base URL local.
-    /// Reimplementa solo el `get` con el base mockeado; el resto del flujo es el
-    /// del cliente real (paginación + topes + resiliencia).
-    struct ClientWithBase {
-        inner: YoutubeClient,
-        base: String,
+    /// Cliente real apuntado al `MockServer` en lugar de googleapis.
+    fn client_for(base: &str) -> YoutubeClient {
+        YoutubeClient::with_base(SecretString::from("test-key".to_string()), base.to_string())
+            .unwrap()
     }
 
     /// Construye una página de `commentThreads` con `n` comentarios y, opcional,
@@ -1157,111 +1163,33 @@ mod http_tests {
         obj
     }
 
-    impl ClientWithBase {
-        // Replica fiel de comments_for_video_into pero contra self.base (test).
-        async fn comments_for_video_into(
-            &self,
-            video_id: &str,
-            out: &mut Vec<CommentThread>,
-            max_pages: Option<usize>,
-            remaining: Option<usize>,
-        ) -> Result<Option<String>, YoutubeError> {
-            let mut page_token = String::new();
-            let mut pages = 0usize;
-            let mut budget = remaining;
-            loop {
-                if matches!(max_pages, Some(max) if pages >= max) {
-                    return Ok(Some(limit_reason("páginas por video")));
-                }
-                let url = format!(
-                    "{}/commentThreads?key=k&videoId={}&pageToken={}",
-                    self.base, video_id, page_token
-                );
-                let resp = self.inner.http.get(&url).send().await?;
-                let status = resp.status();
-                let body = resp.bytes().await?;
-                if !status.is_success() {
-                    return Err(parse_api_error(status.as_u16(), &body));
-                }
-                let list: CommentThreadList = serde_json::from_slice(&body)
-                    .map_err(|e| YoutubeError::Shape(e.to_string()))?;
-                pages += 1;
-                for item in list.items {
-                    if matches!(budget, Some(0)) {
-                        return Ok(Some(limit_reason("comentarios")));
-                    }
-                    out.push(item);
-                    if let Some(b) = budget.as_mut() {
-                        *b -= 1;
-                    }
-                }
-                match list.next_page_token {
-                    Some(t) => page_token = t,
-                    None => return Ok(None),
-                }
-            }
-        }
+    /// Respuesta de `channels.list` con la playlist de uploads de un canal.
+    fn channel_uploads(playlist: &str) -> serde_json::Value {
+        serde_json::json!({
+            "items": [{
+                "contentDetails": { "relatedPlaylists": { "uploads": playlist } }
+            }]
+        })
+    }
 
-        // Replica fiel de fetch_video_meta pero contra self.base (test): verifica
-        // el chunking de 50 ids/request sin tocar la red real.
-        async fn fetch_video_meta(&self, ids: &[String]) -> Result<Vec<VideoMeta>, YoutubeError> {
-            let mut out = Vec::with_capacity(ids.len());
-            for chunk in ids.chunks(50) {
-                let joined = chunk.join(",");
-                let url = format!(
-                    "{}/videos?key=k&id={}&part=snippet,statistics",
-                    self.base, joined
-                );
-                let resp = self.inner.http.get(&url).send().await?;
-                let status = resp.status();
-                let body = resp.bytes().await?;
-                if !status.is_success() {
-                    return Err(parse_api_error(status.as_u16(), &body));
-                }
-                let list: VideoListResponse = serde_json::from_slice(&body)
-                    .map_err(|e| YoutubeError::Shape(e.to_string()))?;
-                out.extend(list.items.iter().map(video_item_to_meta));
-            }
-            Ok(out)
+    /// Página de `playlistItems` con los `video_ids` dados y, opcional, token.
+    fn playlist_page(video_ids: &[&str], next: Option<&str>) -> serde_json::Value {
+        let items: Vec<_> = video_ids
+            .iter()
+            .map(|v| serde_json::json!({ "contentDetails": { "videoId": v } }))
+            .collect();
+        let mut obj = serde_json::json!({ "items": items });
+        if let Some(t) = next {
+            obj["nextPageToken"] = serde_json::json!(t);
         }
+        obj
+    }
 
-        // Replica fiel de search pero contra self.base (test): ejercita la
-        // paginación, el tope max_pages y la resiliencia a cuota.
-        async fn search(&self, plan: &SearchPlan) -> Result<SearchResults, YoutubeError> {
-            let mut hits = Vec::new();
-            let mut page_token = String::new();
-            let mut pages = 0u32;
-            while pages < plan.max_pages {
-                let url = format!("{}/search?key=k&pageToken={}", self.base, page_token);
-                let resp = self.inner.http.get(&url).send().await?;
-                let status = resp.status();
-                let body = resp.bytes().await?;
-                if !status.is_success() {
-                    let err = parse_api_error(status.as_u16(), &body);
-                    if err.is_quota_exceeded() {
-                        return Ok(SearchResults {
-                            hits,
-                            incomplete: true,
-                            incomplete_reason: Some(err.to_string()),
-                        });
-                    }
-                    return Err(err);
-                }
-                let list: SearchListResponse = serde_json::from_slice(&body)
-                    .map_err(|e| YoutubeError::Shape(e.to_string()))?;
-                pages += 1;
-                hits.extend(list.items.iter().filter_map(search_item_to_hit));
-                match list.next_page_token {
-                    Some(t) if pages < plan.max_pages => page_token = t,
-                    _ => break,
-                }
-            }
-            Ok(SearchResults {
-                hits,
-                incomplete: false,
-                incomplete_reason: None,
-            })
-        }
+    /// Body de error de la API con un `reason` (quotaExceeded/commentsDisabled).
+    fn api_error_body(reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "error": { "code": 403, "message": "x", "errors": [{ "reason": reason }] }
+        })
     }
 
     /// Una página de `search.list` con `n` videos y, opcional, `nextPageToken`.
@@ -1288,8 +1216,9 @@ mod http_tests {
     #[tokio::test]
     async fn search_pagina_hasta_max_pages() {
         let server = MockServer::start().await;
+        // 1ra página: SIN pageToken (el cliente real omite params vacíos en la URL).
         Mock::given(path("/search"))
-            .and(query_param("pageToken", ""))
+            .and(query_param_is_missing("pageToken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(search_page(0, 2, Some("P2"))))
             .mount(&server)
             .await;
@@ -1336,7 +1265,7 @@ mod http_tests {
         let server = MockServer::start().await;
         // Página 1 ok (token), página 2 -> quotaExceeded.
         Mock::given(path("/search"))
-            .and(query_param("pageToken", ""))
+            .and(query_param_is_missing("pageToken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(search_page(0, 2, Some("P2"))))
             .mount(&server)
             .await;
@@ -1415,9 +1344,10 @@ mod http_tests {
     #[tokio::test]
     async fn pagina_dos_paginas_y_junta_todo() {
         let server = MockServer::start().await;
-        // Página 1 → token "P2"; página 2 → sin token (fin).
+        // Página 1 → token "P2"; página 2 → sin token (fin). La 1ra request va SIN
+        // pageToken (el cliente real no manda params vacíos).
         Mock::given(path("/commentThreads"))
-            .and(query_param("pageToken", ""))
+            .and(query_param_is_missing("pageToken"))
             .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 2, Some("P2"))))
             .mount(&server)
             .await;
@@ -1493,5 +1423,176 @@ mod http_tests {
             .await
             .unwrap_err();
         assert!(err.is_quota_exceeded());
+    }
+
+    #[tokio::test]
+    async fn presupuesto_justo_al_fin_de_pagina_no_pide_otra_pagina() {
+        // P15: la 1ra página trae EXACTAMENTE `budget` items y aún tiene
+        // nextPageToken. El corte por presupuesto debe ocurrir ANTES de pedir la
+        // 2da página (no gastar una unidad de cuota extra que se descartaría).
+        let server = MockServer::start().await;
+        // Mock SOLO de la 1ra página (sin pageToken), esperado exactamente 1 vez.
+        // Si el cliente pidiera la 2da página (pageToken="P2") no habría mock que
+        // matchee y el test fallaría por request sin respuesta.
+        Mock::given(path("/commentThreads"))
+            .and(query_param_is_missing("pageToken"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 3, Some("P2"))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let mut out = Vec::new();
+        let reason = c
+            .comments_for_video_into("vid1", &mut out, None, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 3, "trae justo el presupuesto");
+        assert!(reason.unwrap().contains("comentarios"));
+        // El drop del server verifica el `.expect(1)`: no se pidió la 2da página.
+    }
+
+    // --- ingest_channel_with: resiliencia de cuota F4 (auditoría P4) ----------
+
+    #[tokio::test]
+    async fn ingest_channel_saltea_comments_disabled_y_junta_el_resto() {
+        let server = MockServer::start().await;
+        // channels.list -> playlist de uploads.
+        Mock::given(path("/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(channel_uploads("UP1")))
+            .mount(&server)
+            .await;
+        // playlistItems -> dos videos.
+        Mock::given(path("/playlistItems"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(playlist_page(&["vidA", "vidB"], None)),
+            )
+            .mount(&server)
+            .await;
+        // vidA: commentsDisabled (se saltea).
+        Mock::given(path("/commentThreads"))
+            .and(query_param("videoId", "vidA"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(api_error_body("commentsDisabled")),
+            )
+            .mount(&server)
+            .await;
+        // vidB: 2 comentarios.
+        Mock::given(path("/commentThreads"))
+            .and(query_param("videoId", "vidB"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 2, None)))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let data = c
+            .ingest_channel_with("UCx", IngestLimits::unlimited())
+            .await
+            .unwrap();
+        assert_eq!(data.comments.len(), 2, "junta los de vidB, saltea vidA");
+        assert!(!data.incomplete, "saltear no marca incompleto");
+    }
+
+    #[tokio::test]
+    async fn ingest_channel_quota_exceeded_conserva_lo_traido() {
+        let server = MockServer::start().await;
+        Mock::given(path("/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(channel_uploads("UP1")))
+            .mount(&server)
+            .await;
+        Mock::given(path("/playlistItems"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(playlist_page(&["vidA", "vidB"], None)),
+            )
+            .mount(&server)
+            .await;
+        // vidA: 2 comentarios ok.
+        Mock::given(path("/commentThreads"))
+            .and(query_param("videoId", "vidA"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 2, None)))
+            .mount(&server)
+            .await;
+        // vidB: quotaExceeded -> corta pero conserva lo de vidA.
+        Mock::given(path("/commentThreads"))
+            .and(query_param("videoId", "vidB"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(api_error_body("quotaExceeded")))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let data = c
+            .ingest_channel_with("UCx", IngestLimits::unlimited())
+            .await
+            .unwrap();
+        assert_eq!(data.comments.len(), 2, "conserva lo ya pagado en cuota");
+        assert!(data.incomplete, "cuota agotada marca incompleto");
+        assert!(data.incomplete_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn ingest_channel_respeta_max_videos() {
+        let server = MockServer::start().await;
+        Mock::given(path("/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(channel_uploads("UP1")))
+            .mount(&server)
+            .await;
+        // La playlist tiene 3 videos pero max_videos=1 corta en el primero.
+        Mock::given(path("/playlistItems"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(playlist_page(
+                &["vidA", "vidB", "vidC"],
+                Some("PP2"),
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(path("/commentThreads"))
+            .and(query_param("videoId", "vidA"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 1, None)))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let limits = IngestLimits {
+            max_videos: Some(1),
+            ..Default::default()
+        };
+        let data = c.ingest_channel_with("UCx", limits).await.unwrap();
+        assert_eq!(data.comments.len(), 1, "solo el primer video");
+        assert!(data.incomplete, "truncar por max_videos marca incompleto");
+        assert!(data
+            .incomplete_reason
+            .unwrap()
+            .contains("videos por canal"));
+    }
+
+    #[tokio::test]
+    async fn ingest_channel_respeta_max_comments_global() {
+        let server = MockServer::start().await;
+        Mock::given(path("/channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(channel_uploads("UP1")))
+            .mount(&server)
+            .await;
+        Mock::given(path("/playlistItems"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(playlist_page(&["vidA", "vidB"], None)),
+            )
+            .mount(&server)
+            .await;
+        // vidA trae 3 comentarios; el presupuesto global es 3 -> al pasar a vidB ya
+        // está alcanzado y corta.
+        Mock::given(path("/commentThreads"))
+            .and(query_param("videoId", "vidA"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(0, 3, None)))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let limits = IngestLimits {
+            max_comments: Some(3),
+            ..Default::default()
+        };
+        let data = c.ingest_channel_with("UCx", limits).await.unwrap();
+        assert_eq!(data.comments.len(), 3);
+        assert!(data.incomplete);
+        assert!(data.incomplete_reason.unwrap().contains("comentarios"));
     }
 }

@@ -84,11 +84,16 @@ pub fn most_active_of(ranking: &[CommenterStats], n: usize) -> Vec<CommenterStat
     ranking[..n.min(ranking.len())].to_vec()
 }
 
-/// Los `n` que **menos** comentan, derivados de un ranking **ya calculado**
-/// (la cola del mismo orden).
+/// Los `n` que **menos** comentan, derivados de un ranking **ya calculado**.
+///
+/// Es la cola del mismo orden, pero **invertida**: el ranking viene de más a
+/// menos activo, así que la cola cruda queda de mayor a menor *dentro de los
+/// menos activos*. Para que el panel "menos activos" se lea coherente con su
+/// rótulo (el que MENOS comenta primero), devolvemos la cola en orden creciente
+/// de actividad.
 pub fn least_active_of(ranking: &[CommenterStats], n: usize) -> Vec<CommenterStats> {
     let start = ranking.len().saturating_sub(n);
-    ranking[start..].to_vec()
+    ranking[start..].iter().rev().cloned().collect()
 }
 
 /// Los `n` que **más** comentan.
@@ -193,11 +198,14 @@ mod tests {
     }
 
     #[test]
-    fn menos_activos_devuelve_la_cola() {
+    fn menos_activos_devuelve_la_cola_con_el_menos_activo_primero() {
+        // El ranking va de más a menos activo (ana, beto, caro). El panel
+        // "menos activos" debe leerse coherente con su rótulo: el que MENOS
+        // comenta primero. La cola cruda [beto, caro] invertida → [caro, beto].
         let (comments, commenters) = sample();
         let bottom = least_active(&comments, &commenters, 2);
         let ids: Vec<&str> = bottom.iter().map(|s| s.channel_id.as_str()).collect();
-        assert_eq!(ids, vec!["beto", "caro"]);
+        assert_eq!(ids, vec!["caro", "beto"]);
     }
 
     #[test]

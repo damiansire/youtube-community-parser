@@ -21,8 +21,10 @@ const ANTHROPIC_BASE: &str = "https://api.anthropic.com";
 const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
-/// Tope de tokens de salida de la respuesta del modelo.
-const MAX_TOKENS: u32 = 1024;
+/// Tope de tokens de salida por defecto, si el llamador no especifica uno.
+/// El caller (la capa IPC) deriva un tope acorde al presupuesto del estimate
+/// para que la respuesta no se trunque a mitad del JSON (ver auditoría P2).
+const DEFAULT_MAX_TOKENS: u32 = 1024;
 /// Reintentos ante 429 (rate limit) antes de rendirse.
 const MAX_RETRIES: u32 = 2;
 
@@ -101,6 +103,7 @@ pub struct AnthropicProvider {
     api_key: SecretString,
     model: String,
     base: String,
+    max_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -130,7 +133,15 @@ impl AnthropicProvider {
             api_key,
             model,
             base,
+            max_tokens: DEFAULT_MAX_TOKENS,
         })
+    }
+
+    /// Fija el tope de tokens de salida (builder). El caller lo deriva del
+    /// presupuesto del estimate para no truncar la respuesta (auditoría P2).
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 
     fn key(&self) -> &str {
@@ -143,7 +154,7 @@ impl InsightProvider for AnthropicProvider {
     async fn enhance(&self, prompt: &EnhancePrompt) -> Result<String, LlmError> {
         let body = serde_json::json!({
             "model": self.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": self.max_tokens,
             "system": prompt.system,
             "messages": [{ "role": "user", "content": prompt.user }],
         });
@@ -180,6 +191,7 @@ pub struct GeminiProvider {
     api_key: SecretString,
     model: String,
     base: String,
+    max_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -217,7 +229,16 @@ impl GeminiProvider {
             api_key,
             model,
             base,
+            max_tokens: DEFAULT_MAX_TOKENS,
         })
+    }
+
+    /// Fija el tope de tokens de salida (builder). Simétrico con Anthropic: sin
+    /// esto Gemini no enviaba ningún tope y el contrato de salida divergía entre
+    /// proveedores (auditoría P2).
+    pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 
     fn key(&self) -> &str {
@@ -233,6 +254,7 @@ impl InsightProvider for GeminiProvider {
         let body = serde_json::json!({
             "systemInstruction": { "parts": [{ "text": prompt.system }] },
             "contents": [{ "role": "user", "parts": [{ "text": prompt.user }] }],
+            "generationConfig": { "maxOutputTokens": self.max_tokens },
         });
         let url = format!("{}/v1beta/models/{}:generateContent", self.base, self.model);
         let resp = send_with_retry(|| {
@@ -273,20 +295,32 @@ impl InsightProvider for GeminiProvider {
 
 /// Construye el adaptador concreto según el proveedor elegido. `model = None`
 /// usa el modelo por defecto (el más capaz vigente del proveedor).
+///
+/// `max_tokens = None` deja el tope por defecto; el caller normalmente lo deriva
+/// del presupuesto del estimate (`sdp_core::max_output_tokens_for`) para que la
+/// respuesta no se trunque y se cobre por un JSON inválido (auditoría P2).
 pub fn build_provider(
     provider: AiProvider,
     api_key: SecretString,
     model: Option<String>,
+    max_tokens: Option<u32>,
 ) -> Result<Box<dyn InsightProvider>, LlmError> {
+    let max_tokens = max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
     match provider {
-        AiProvider::Anthropic => Ok(Box::new(AnthropicProvider::new(
-            api_key,
-            model.unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string()),
-        )?)),
-        AiProvider::Gemini => Ok(Box::new(GeminiProvider::new(
-            api_key,
-            model.unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string()),
-        )?)),
+        AiProvider::Anthropic => Ok(Box::new(
+            AnthropicProvider::new(
+                api_key,
+                model.unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string()),
+            )?
+            .with_max_tokens(max_tokens),
+        )),
+        AiProvider::Gemini => Ok(Box::new(
+            GeminiProvider::new(
+                api_key,
+                model.unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string()),
+            )?
+            .with_max_tokens(max_tokens),
+        )),
     }
 }
 
@@ -399,6 +433,48 @@ mod tests {
             }
             other => panic!("esperaba Api, fue {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn anthropic_envia_el_max_tokens_configurado() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        // El mock SOLO matchea si el body trae max_tokens=2048: si el provider no
+        // lo enviara (o enviara otro), no habría match y el enhance fallaría.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({ "max_tokens": 2048 })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let p = AnthropicProvider::with_base(key(), "m".into(), server.uri())
+            .unwrap()
+            .with_max_tokens(2048);
+        assert_eq!(p.enhance(&prompt()).await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn gemini_envia_max_output_tokens() {
+        use wiremock::matchers::body_partial_json;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
+            .and(body_partial_json(
+                serde_json::json!({ "generationConfig": { "maxOutputTokens": 1536 } }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "candidates": [{ "content": { "parts": [{ "text": "ok" }] } }]
+            })))
+            .mount(&server)
+            .await;
+
+        let p = GeminiProvider::with_base(key(), "gemini-2.5-flash".into(), server.uri())
+            .unwrap()
+            .with_max_tokens(1536);
+        assert_eq!(p.enhance(&prompt()).await.unwrap(), "ok");
     }
 
     #[test]

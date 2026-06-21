@@ -49,9 +49,25 @@ pub enum ParseError {
 }
 
 /// Tokens de salida que asumimos por idea al estimar el costo (techo prudente).
-const OUTPUT_TOKENS_PER_IDEA: u64 = 80;
+pub const OUTPUT_TOKENS_PER_IDEA: u64 = 80;
 /// Aproximación de tokens por carácter (~4 chars/token) para estimar la entrada.
 const CHARS_PER_TOKEN: usize = 4;
+/// Margen fijo de tokens de salida sobre el presupuesto por idea (cierres de
+/// JSON, espacios, una idea que se pase del techo). Evita truncar la respuesta
+/// justo en el borde del array.
+const OUTPUT_TOKENS_MARGIN: u64 = 256;
+/// Piso del tope de salida: aunque haya 0/1 ideas, dejamos lugar para un array
+/// JSON razonable.
+const OUTPUT_TOKENS_FLOOR: u64 = 512;
+
+/// Deriva el tope de tokens de salida (`max_tokens`) del **mismo presupuesto**
+/// que usa el estimate de costo: `OUTPUT_TOKENS_PER_IDEA * ideas + margen`, con
+/// un piso. Que el ejecutado coincida con lo estimado evita cobrar por una
+/// respuesta que `max_tokens` garantiza truncada (ver auditoría P2).
+pub fn max_output_tokens_for(idea_count: usize) -> u64 {
+    let budget = OUTPUT_TOKENS_PER_IDEA * idea_count as u64 + OUTPUT_TOKENS_MARGIN;
+    budget.max(OUTPUT_TOKENS_FLOOR)
+}
 
 /// Precio en `usd_micros` (millonésimas de dólar) por **1M de tokens**, por
 /// proveedor/modelo. Verificar contra la tabla vigente del proveedor.
@@ -193,6 +209,25 @@ mod tests {
             CostKind::Money { usd_micros } => assert!(usd_micros > 0),
             other => panic!("esperaba Money, fue {other:?}"),
         }
+    }
+
+    #[test]
+    fn max_tokens_cubre_el_presupuesto_de_salida_estimado() {
+        // El tope de salida debe ser >= lo que el estimate proyecta por idea, más
+        // un margen: si fuera menor, la respuesta se truncaría y se cobraría por
+        // un JSON inválido (auditoría P2).
+        for n in [0usize, 1, 13, 50, 200] {
+            let budget = OUTPUT_TOKENS_PER_IDEA * n as u64;
+            let max = max_output_tokens_for(n);
+            assert!(
+                max >= budget,
+                "n={n}: max_tokens {max} < presupuesto {budget}"
+            );
+        }
+        // Caso del informe: 13 ideas (13*80=1040) requiere más que el viejo 1024.
+        assert!(max_output_tokens_for(13) > 1024);
+        // Piso: pocas ideas igual dejan lugar para un array razonable.
+        assert!(max_output_tokens_for(0) >= 512);
     }
 
     #[test]

@@ -20,8 +20,8 @@ pub use cost::{
 };
 pub use ideas::{detect_questions, detect_requests, mine_video_ideas, DemandSignal, VideoIdea};
 pub use insight::{
-    build_ideas_prompt, estimate_ideas_ai, parse_ideas_response, AiIdea, AiProvider, EnhancePrompt,
-    ParseError,
+    build_ideas_prompt, estimate_ideas_ai, max_output_tokens_for, parse_ideas_response, AiIdea,
+    AiProvider, EnhancePrompt, ParseError, OUTPUT_TOKENS_PER_IDEA,
 };
 pub use models::{ChannelId, Comment, Commenter, SearchHit, SearchPlan, VideoMeta};
 pub use ranking::{

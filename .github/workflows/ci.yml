@@ -1,0 +1,55 @@
+# Gate de calidad en CI (auditoría P6): el mismo `just check` + tests que el dev
+# corre local, ahora enforced en push/PR. Sin esto, fmt/clippy/test/build y los
+# boundaries de capa dependían 100% de la disciplina manual.
+#
+# Corre en windows-latest (que ya trae Build Tools MSVC + WebView2) porque
+# src-tauri necesita el toolchain MSVC para linkear.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  rust:
+    name: fmt + clippy + test + build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar toolchain Rust (MSVC) con rustfmt y clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache de cargo y target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formato verificado
+        run: cargo fmt --all -- --check
+
+      - name: Clippy sin warnings (todo el workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests del workspace
+        run: cargo test --workspace
+
+      - name: Build (incluye src-tauri)
+        run: cargo build --workspace
+
+  npm-audit:
+    name: npm audit (legacy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Auditar dependencias de producción del paquete legacy
+        working-directory: legacy
+        run: npm audit --omit=dev

@@ -2,11 +2,13 @@
 //!
 //! Toda la lógica vive acá (no en `main.rs`) por compatibilidad con mobile.
 
+mod confirm;
 mod youtube;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use confirm::{ConfirmError, ConfirmStore, OpFingerprint};
 use sdp_core::{
     least_active_of, most_active_of, rank_commenters, AiIdea, AiProvider, BenchmarkReport, Comment,
     Commenter, CommenterStats, CorpusInsights, CostEstimate, CostPolicy, SearchPlan, SeoInput,
@@ -15,7 +17,7 @@ use sdp_core::{
 use sdp_storage::Store;
 use secrecy::SecretString;
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Manager, State};
 use youtube::{IngestLimits, Ingested, SearchResults, YoutubeClient};
 
 /// Tope por defecto de la ingesta de un canal (F4): evita agotar la cuota
@@ -97,6 +99,78 @@ pub enum CommandError {
     Llm(#[from] sdp_llm::LlmError),
     #[error("no se pudo parsear la respuesta de IA: {0}")]
     AiParse(#[from] sdp_core::ParseError),
+    #[error("una tarea interna falló inesperadamente: {0}")]
+    Task(String),
+}
+
+impl From<ConfirmError> for CommandError {
+    fn from(e: ConfirmError) -> Self {
+        let msg = match e {
+            ConfirmError::Missing => {
+                "falta el token de confirmación; estimá la operación y confirmá el modal"
+            }
+            ConfirmError::Unknown => {
+                "el token de confirmación no es válido (ya se usó o expiró); volvé a estimar"
+            }
+            ConfirmError::Mismatch => {
+                "los datos cambiaron desde que confirmaste; volvé a estimar y confirmá de nuevo"
+            }
+        };
+        CommandError::NeedsConfirmation(msg.to_string())
+    }
+}
+
+/// Helper para mapear un `JoinError` de `spawn_blocking` a un `CommandError`
+/// tipado en lugar de paniquear (un panic en la tarea crasheaba el comando).
+fn join_err(e: tokio::task::JoinError) -> CommandError {
+    CommandError::Task(e.to_string())
+}
+
+/// Estimación + token de confirmación de un solo uso (auditoría P1). El front
+/// muestra el modal con `estimate` y, al confirmar, devuelve `confirmation_token`
+/// al `run_*` correspondiente. `None` cuando la operación es gratis.
+#[derive(Debug, Serialize)]
+pub struct ConfirmableEstimate {
+    #[serde(flatten)]
+    pub estimate: CostEstimate,
+    pub confirmation_token: Option<String>,
+}
+
+/// Construye la respuesta de un `estimate_*`: si la operación requiere
+/// confirmación, emite un token ligado al fingerprint; si es gratis, no.
+fn confirmable(
+    store: &ConfirmStore,
+    op: &str,
+    estimate: CostEstimate,
+    corpus_hash: u64,
+) -> ConfirmableEstimate {
+    let confirmation_token = if estimate.requires_confirmation {
+        Some(store.issue(OpFingerprint::new(op, &estimate, corpus_hash)))
+    } else {
+        None
+    };
+    ConfirmableEstimate {
+        estimate,
+        confirmation_token,
+    }
+}
+
+/// Valida (y consume) el token de confirmación contra el estimate re-calculado
+/// server-side. Si la operación NO requiere confirmación, pasa sin token. Cierra
+/// el agujero del `confirmed: bool` crudo (auditoría P1).
+fn ensure_confirmed_token(
+    store: &ConfirmStore,
+    op: &str,
+    estimate: &CostEstimate,
+    corpus_hash: u64,
+    token: Option<&str>,
+) -> Result<(), CommandError> {
+    if !sdp_core::needs_optin(estimate, &CostPolicy::default()) {
+        return Ok(());
+    }
+    let expected = OpFingerprint::new(op, estimate, corpus_hash);
+    store.consume(token, &expected)?;
+    Ok(())
 }
 
 impl serde::Serialize for CommandError {
@@ -172,13 +246,33 @@ fn client(api_key: String) -> Result<YoutubeClient, CommandError> {
 
 /// Ruta del archivo SQLite del histórico, dentro del directorio de datos de la
 /// app (resuelto por Tauri, nunca hardcodeado).
-fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
+///
+/// `create_dir_all` es I/O bloqueante: se corre con `tokio::fs` para no trabar el
+/// executor de Tokio en cada comando (auditoría P9).
+async fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| CommandError::DataDir(e.to_string()))?;
-    std::fs::create_dir_all(&dir).map_err(|e| CommandError::DataDir(e.to_string()))?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| CommandError::DataDir(e.to_string()))?;
     Ok(dir.join("history.sqlite3"))
+}
+
+/// Lee todos los comentarios del histórico local (SQLite). Encapsula el patrón
+/// `db_path → spawn_blocking(Store::open + all_comments)` que estaba copiado en 6
+/// comandos, y mapea el `JoinError` a un `CommandError` tipado en vez de
+/// paniquear (auditoría P10).
+async fn read_comments(app: &tauri::AppHandle) -> Result<Vec<Comment>, CommandError> {
+    let path = db_path(app).await?;
+    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
+        let store = Store::open(path)?;
+        store.all_comments()
+    })
+    .await
+    .map_err(join_err)??;
+    Ok(comments)
 }
 
 /// Persiste una ingesta en el histórico local (F3: cablear `sdp-storage`).
@@ -188,7 +282,7 @@ fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, CommandError> {
 /// analizar el mismo canal no duplica, actualiza. Guardar el histórico permite
 /// luego analizar la evolución **sin volver a gastar cuota** (`analyze_history`).
 async fn persist(app: &tauri::AppHandle, data: &Ingested) -> Result<(), CommandError> {
-    let path = db_path(app)?;
+    let path = db_path(app).await?;
     let comments = data.comments.clone();
     let commenters = data.commenters.clone();
     tokio::task::spawn_blocking(move || -> Result<(), sdp_storage::StoreError> {
@@ -198,7 +292,7 @@ async fn persist(app: &tauri::AppHandle, data: &Ingested) -> Result<(), CommandE
         Ok(())
     })
     .await
-    .expect("la tarea de persistencia no debe paniquear")?;
+    .map_err(join_err)??;
     Ok(())
 }
 
@@ -242,14 +336,14 @@ async fn analyze_channel(
 /// de la comunidad reusando lo ya ingerido en sesiones anteriores.
 #[tauri::command]
 async fn analyze_history(app: tauri::AppHandle) -> Result<Analysis, CommandError> {
-    let path = db_path(&app)?;
+    let path = db_path(&app).await?;
     let (comments, commenters) =
         tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
             let store = Store::open(path)?;
             Ok((store.all_comments()?, store.all_commenters()?))
         })
         .await
-        .expect("la tarea de lectura del histórico no debe paniquear")?;
+        .map_err(join_err)??;
     Ok(Analysis::build(&comments, &commenters, 5))
 }
 
@@ -259,7 +353,7 @@ async fn persist_video_meta(
     app: &tauri::AppHandle,
     videos: &[VideoMeta],
 ) -> Result<(), CommandError> {
-    let path = db_path(app)?;
+    let path = db_path(app).await?;
     let videos = videos.to_vec();
     tokio::task::spawn_blocking(move || -> Result<(), sdp_storage::StoreError> {
         let mut store = Store::open(path)?;
@@ -267,20 +361,7 @@ async fn persist_video_meta(
         Ok(())
     })
     .await
-    .expect("la tarea de persistencia no debe paniquear")?;
-    Ok(())
-}
-
-/// Gate de costo **server-side** (principio transversal, F6): si la operación
-/// supera el umbral de la política y el usuario no confirmó, se rechaza ANTES de
-/// gastar cuota. Re-calcula con el estimate recibido — no confía en el front.
-fn ensure_confirmed(estimate: &CostEstimate, confirmed: bool) -> Result<(), CommandError> {
-    if !confirmed && sdp_core::needs_optin(estimate, &CostPolicy::default()) {
-        return Err(CommandError::NeedsConfirmation(format!(
-            "{:?}; volvé a llamar con confirmed = true tras mostrar el modal",
-            estimate.kind
-        )));
-    }
+    .map_err(join_err)??;
     Ok(())
 }
 
@@ -288,125 +369,200 @@ fn ensure_confirmed(estimate: &CostEstimate, confirmed: bool) -> Result<(), Comm
 /// de la comunidad (F6). Costo 0: trabaja sobre lo ya persistido, sin red.
 #[tauri::command]
 async fn analyze_corpus(app: tauri::AppHandle) -> Result<CorpusInsights, CommandError> {
-    let path = db_path(&app)?;
-    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-        let store = Store::open(path)?;
-        store.all_comments()
-    })
-    .await
-    .expect("la tarea de lectura del histórico no debe paniquear")?;
+    let comments = read_comments(&app).await?;
     let texts: Vec<String> = comments.into_iter().map(|c| c.text).collect();
     Ok(sdp_core::corpus_insights(&texts))
+}
+
+/// Mina las ideas del histórico local (compartido por F7 y la capa de IA F12).
+/// Única fuente de verdad: el comando `mine_ideas` delega acá para que el
+/// criterio de minería que ve el usuario coincida con el que se estima y cobra
+/// (auditoría P10).
+async fn mined_ideas(app: &tauri::AppHandle) -> Result<Vec<sdp_core::VideoIdea>, CommandError> {
+    let comments = read_comments(app).await?;
+    Ok(sdp_core::mine_video_ideas(&comments))
 }
 
 /// Mina ideas de video desde el histórico local (F7): preguntas, pedidos y temas
 /// recurrentes de la comunidad. Costo 0, sin red.
 #[tauri::command]
 async fn mine_ideas(app: tauri::AppHandle) -> Result<Vec<VideoIdea>, CommandError> {
-    let path = db_path(&app)?;
-    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-        let store = Store::open(path)?;
-        store.all_comments()
-    })
-    .await
-    .expect("la tarea de lectura del histórico no debe paniquear")?;
-    Ok(sdp_core::mine_video_ideas(&comments))
+    mined_ideas(&app).await
 }
 
-/// Mina las ideas del histórico local (compartido por F7 y la capa de IA F12).
-async fn mined_ideas(app: &tauri::AppHandle) -> Result<Vec<sdp_core::VideoIdea>, CommandError> {
-    let path = db_path(app)?;
-    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-        let store = Store::open(path)?;
-        store.all_comments()
-    })
-    .await
-    .expect("la tarea de lectura del histórico no debe paniquear")?;
-    Ok(sdp_core::mine_video_ideas(&comments))
-}
-
-/// Estima el costo EN DINERO (US$) de refinar las ideas con IA (F12). Gratis: solo calcula.
+/// Estima el costo EN DINERO (US$) de refinar las ideas con IA (F12). Gratis:
+/// solo calcula. Emite un **token de confirmación** ligado al monto y al hash de
+/// las ideas minadas (auditoría P1): `refine_ideas_ai` lo exige de vuelta.
 #[tauri::command]
 async fn estimate_ideas_ai(
     app: tauri::AppHandle,
     provider: AiProvider,
-) -> Result<CostEstimate, CommandError> {
+    confirm: State<'_, ConfirmStore>,
+) -> Result<ConfirmableEstimate, CommandError> {
     let ideas = mined_ideas(&app).await?;
-    Ok(sdp_core::estimate_ideas_ai(provider, &ideas))
+    let estimate = sdp_core::estimate_ideas_ai(provider, &ideas);
+    let corpus_hash = confirm::hash_texts(&ideas_fingerprint(&ideas));
+    let op = format!("refine_ideas_ai:{provider:?}");
+    Ok(confirmable(&confirm, &op, estimate, corpus_hash))
 }
 
-/// Refina las ideas con IA (F12) TRAS pasar el gate de costo en US$. Inyecta el
-/// adaptador concreto según `provider`; la key vive lo justo (SecretString).
+/// Huella de las ideas para ligar el token al insumo exacto (cambia si cambian
+/// las ideas → el monto re-estimado también cambia, cerrando el TOCTOU).
+fn ideas_fingerprint(ideas: &[VideoIdea]) -> Vec<String> {
+    ideas
+        .iter()
+        .map(|i| {
+            format!(
+                "{}|{:?}|{}",
+                i.title_seed,
+                i.signal,
+                i.supporting_comment_ids.len()
+            )
+        })
+        .collect()
+}
+
+/// Refina las ideas con IA (F12) TRAS pasar el gate de costo en US$, validado por
+/// un **token de un solo uso** (auditoría P1) ligado al monto y al corpus minado.
+/// El `max_tokens` se deriva del mismo presupuesto del estimate para no truncar
+/// la respuesta y cobrar por un JSON inválido (auditoría P2).
 #[tauri::command]
 async fn refine_ideas_ai(
     app: tauri::AppHandle,
     provider: AiProvider,
     api_key: String,
-    confirmed: bool,
+    confirmation_token: Option<String>,
+    confirm: State<'_, ConfirmStore>,
 ) -> Result<Vec<AiIdea>, CommandError> {
     let ideas = mined_ideas(&app).await?;
-    ensure_confirmed(&sdp_core::estimate_ideas_ai(provider, &ideas), confirmed)?;
+    let estimate = sdp_core::estimate_ideas_ai(provider, &ideas);
+    let corpus_hash = confirm::hash_texts(&ideas_fingerprint(&ideas));
+    let op = format!("refine_ideas_ai:{provider:?}");
+    ensure_confirmed_token(
+        &confirm,
+        &op,
+        &estimate,
+        corpus_hash,
+        confirmation_token.as_deref(),
+    )?;
+
     let prompt = sdp_core::build_ideas_prompt(&ideas);
-    let client = sdp_llm::build_provider(provider, SecretString::from(api_key), None)?;
+    // Tope de salida derivado del presupuesto: lo ejecutado == lo estimado.
+    let max_tokens = sdp_core::max_output_tokens_for(ideas.len()).min(u32::MAX as u64) as u32;
+    let client =
+        sdp_llm::build_provider(provider, SecretString::from(api_key), None, Some(max_tokens))?;
     let raw = client.enhance(&prompt).await?;
-    Ok(sdp_core::parse_ideas_response(&raw)?)
+    sdp_core::parse_ideas_response(&raw).map_err(CommandError::from)
 }
 
 /// Audita el SEO de un texto candidato (F8) cruzándolo con las keywords que
 /// demanda la comunidad (del histórico local). Costo 0, sin red.
 #[tauri::command]
 async fn audit_seo(app: tauri::AppHandle, input: SeoInput) -> Result<SeoReport, CommandError> {
-    let path = db_path(&app)?;
-    let comments = tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
-        let store = Store::open(path)?;
-        store.all_comments()
-    })
-    .await
-    .expect("la tarea de lectura del histórico no debe paniquear")?;
+    let comments = read_comments(&app).await?;
     let texts: Vec<String> = comments.into_iter().map(|c| c.text).collect();
     let corpus = sdp_core::corpus_insights(&texts);
     Ok(sdp_core::audit_seo(&input, &corpus))
 }
 
 /// Estima el costo de traer la metadata de `ids` videos (F9). Gratis: solo
-/// calcula (`ceil(n/50)` unidades). La UI lo muestra antes de `fetch_video_meta`.
+/// calcula (`ceil(n/50)` unidades). Emite un token de confirmación ligado al
+/// conjunto de ids (auditoría P1).
 #[tauri::command]
-fn estimate_video_meta(ids: Vec<String>) -> CostEstimate {
-    sdp_core::cost::estimate_video_meta(ids.len())
+fn estimate_video_meta(
+    ids: Vec<String>,
+    confirm: State<'_, ConfirmStore>,
+) -> ConfirmableEstimate {
+    let estimate = sdp_core::cost::estimate_video_meta(ids.len());
+    let corpus_hash = confirm::hash_texts(&ids);
+    confirmable(&confirm, "fetch_video_meta", estimate, corpus_hash)
 }
 
-/// Trae la metadata de videos (F9) **tras pasar el gate de costo** y la persiste.
-/// Re-estima server-side; sin `confirmed` cuando hay costo, no ejecuta.
+/// Resultado de `fetch_video_meta` (F9): los videos traídos y los IDs pedidos que
+/// la API NO devolvió (inexistentes/privados). El front reconcilia la diferencia
+/// en vez de mostrar `videos.length` a secas (auditoría P12), alineándose con el
+/// patrón `incomplete`/`incomplete_reason` de los comandos hermanos.
+#[derive(Debug, Serialize)]
+pub struct VideoMetaResult {
+    pub videos: Vec<VideoMeta>,
+    pub missing_ids: Vec<String>,
+}
+
+/// Trae la metadata de videos (F9) **tras pasar el gate de costo** (token de un
+/// solo uso, auditoría P1) y la persiste. Re-estima server-side.
 #[tauri::command]
 async fn fetch_video_meta(
     app: tauri::AppHandle,
     ids: Vec<String>,
     api_key: String,
-    confirmed: bool,
-) -> Result<Vec<VideoMeta>, CommandError> {
-    ensure_confirmed(&sdp_core::cost::estimate_video_meta(ids.len()), confirmed)?;
+    confirmation_token: Option<String>,
+    confirm: State<'_, ConfirmStore>,
+) -> Result<VideoMetaResult, CommandError> {
+    let estimate = sdp_core::cost::estimate_video_meta(ids.len());
+    let corpus_hash = confirm::hash_texts(&ids);
+    ensure_confirmed_token(
+        &confirm,
+        "fetch_video_meta",
+        &estimate,
+        corpus_hash,
+        confirmation_token.as_deref(),
+    )?;
     let videos = client(api_key)?.fetch_video_meta(&ids).await?;
     persist_video_meta(&app, &videos).await?;
-    Ok(videos)
+    let missing_ids = missing_video_ids(&ids, &videos);
+    Ok(VideoMetaResult {
+        videos,
+        missing_ids,
+    })
+}
+
+/// IDs pedidos que no volvieron en la respuesta (la API omite los inexistentes).
+/// Deduplica y preserva el orden de aparición. PURO — testeable sin red.
+fn missing_video_ids(requested: &[String], returned: &[VideoMeta]) -> Vec<String> {
+    let present: HashSet<&str> = returned.iter().map(|v| v.video_id.as_str()).collect();
+    let mut seen = HashSet::new();
+    requested
+        .iter()
+        .filter(|id| !present.contains(id.as_str()))
+        .filter(|id| seen.insert(id.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// Estima el costo de una búsqueda (F10): 100 unidades por página. Gratis: solo
-/// calcula. `requires_confirmation` siempre es `true` para cualquier página.
+/// calcula. Emite un token de confirmación ligado al plan (auditoría P1).
 #[tauri::command]
-fn estimate_search(plan: SearchPlan) -> CostEstimate {
-    sdp_core::cost::estimate_search(plan.max_pages)
+fn estimate_search(plan: SearchPlan, confirm: State<'_, ConfirmStore>) -> ConfirmableEstimate {
+    let estimate = sdp_core::cost::estimate_search(plan.max_pages);
+    let corpus_hash = confirm::hash_texts(&[search_fingerprint(&plan)]);
+    confirmable(&confirm, "run_search", estimate, corpus_hash)
+}
+
+/// Huella del plan de búsqueda para ligar el token: si cambia query/trending/
+/// páginas entre estimar y ejecutar, el token deja de servir.
+fn search_fingerprint(plan: &SearchPlan) -> String {
+    format!("{}|{}|{}", plan.query, plan.trending, plan.max_pages)
 }
 
 /// Ejecuta una búsqueda/trending (F10) **tras pasar el gate de costo** (cara:
-/// 100u/página). Devuelve resultados parciales con `incomplete` si la cuota se
-/// agota a mitad (F4).
+/// 100u/página) validado por un token de un solo uso (auditoría P1). Devuelve
+/// resultados parciales con `incomplete` si la cuota se agota a mitad (F4).
 #[tauri::command]
 async fn run_search(
     plan: SearchPlan,
     api_key: String,
-    confirmed: bool,
+    confirmation_token: Option<String>,
+    confirm: State<'_, ConfirmStore>,
 ) -> Result<SearchResults, CommandError> {
-    ensure_confirmed(&sdp_core::cost::estimate_search(plan.max_pages), confirmed)?;
+    let estimate = sdp_core::cost::estimate_search(plan.max_pages);
+    let corpus_hash = confirm::hash_texts(&[search_fingerprint(&plan)]);
+    ensure_confirmed_token(
+        &confirm,
+        "run_search",
+        &estimate,
+        corpus_hash,
+        confirmation_token.as_deref(),
+    )?;
     Ok(client(api_key)?.search(&plan).await?)
 }
 
@@ -419,28 +575,46 @@ async fn benchmark_channels(
     my_id: String,
     competitor_ids: Vec<String>,
 ) -> Result<BenchmarkReport, CommandError> {
-    let path = db_path(&app)?;
+    let path = db_path(&app).await?;
     let (videos, comments) =
         tokio::task::spawn_blocking(move || -> Result<_, sdp_storage::StoreError> {
             let store = Store::open(path)?;
             Ok((store.all_video_meta()?, store.all_comments()?))
         })
         .await
-        .expect("la tarea de lectura del histórico no debe paniquear")?;
+        .map_err(join_err)??;
 
-    // Perfila un canal: sus videos + los comentarios sobre esos videos.
+    // Agrupamos UNA sola vez en O(V+C) en lugar de re-escanear y clonar TODO el
+    // histórico por cada canal (era O((1+M)·(V+C)) con clones completos, P7):
+    //   - videos por channel_id;
+    //   - comentarios por el channel_id dueño de su video (vía video_id→channel).
+    use std::collections::HashMap;
+    let mut videos_by_channel: HashMap<&str, Vec<&VideoMeta>> = HashMap::new();
+    let mut channel_of_video: HashMap<&str, &str> = HashMap::new();
+    for v in &videos {
+        videos_by_channel
+            .entry(v.channel_id.as_str())
+            .or_default()
+            .push(v);
+        channel_of_video.insert(v.video_id.as_str(), v.channel_id.as_str());
+    }
+    let mut comments_by_channel: HashMap<&str, Vec<&Comment>> = HashMap::new();
+    for c in &comments {
+        if let Some(chan) = channel_of_video.get(c.video_id.as_str()) {
+            comments_by_channel.entry(chan).or_default().push(c);
+        }
+    }
+
+    // Perfila un canal clonando SOLO sus propios items (no el histórico entero).
     let profile = |id: &str| {
-        let chan_videos: Vec<VideoMeta> = videos
-            .iter()
-            .filter(|v| v.channel_id == id)
-            .cloned()
-            .collect();
-        let video_ids: HashSet<&str> = chan_videos.iter().map(|v| v.video_id.as_str()).collect();
-        let chan_comments: Vec<Comment> = comments
-            .iter()
-            .filter(|c| video_ids.contains(c.video_id.as_str()))
-            .cloned()
-            .collect();
+        let chan_videos: Vec<VideoMeta> = videos_by_channel
+            .get(id)
+            .map(|vs| vs.iter().map(|v| (*v).clone()).collect())
+            .unwrap_or_default();
+        let chan_comments: Vec<Comment> = comments_by_channel
+            .get(id)
+            .map(|cs| cs.iter().map(|c| (*c).clone()).collect())
+            .unwrap_or_default();
         sdp_core::profile_channel(id, &chan_videos, &chan_comments)
     };
 
@@ -452,6 +626,7 @@ async fn benchmark_channels(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(ConfirmStore::new())
         .invoke_handler(tauri::generate_handler![
             analyze_demo,
             analyze_video,
@@ -470,4 +645,105 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error al iniciar la aplicación Tauri");
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests de la capa de comandos (auditoría P5). Cubren las piezas **puras**
+    //! que no necesitan un `AppHandle`: el armado del análisis (sin solapamiento
+    //! entre extremos), el gate de confirmación por token (free/gated/replay/
+    //! mismatch) y el cálculo de ids faltantes. La verificación de que el gate
+    //! corre ANTES de pegarle al proveedor está cubierta estructuralmente: el
+    //! token se consume antes de `build_provider` y `confirm.rs` testea el gate.
+    use super::*;
+
+    #[test]
+    fn analysis_build_no_solapa_top_y_bottom() {
+        // Con pocos comentaristas y extremes alto, top y bottom se solaparían si
+        // no excluyéramos: el contrato es top ∩ bottom = ∅.
+        let (comments, commenters) = sample(); // 4 comentaristas
+        let a = Analysis::build(&comments, &commenters, 3);
+        let top_ids: HashSet<&str> = a.top.iter().map(|s| s.channel_id.as_str()).collect();
+        let bottom_ids: HashSet<&str> = a.bottom.iter().map(|s| s.channel_id.as_str()).collect();
+        assert!(
+            top_ids.is_disjoint(&bottom_ids),
+            "ningún comentarista puede estar en top y bottom a la vez"
+        );
+        assert_eq!(a.total_commenters, 4);
+        // Cada persona aparece a lo sumo una vez entre ambos extremos.
+        assert!(a.top.len() + a.bottom.len() <= a.total_commenters);
+    }
+
+    #[test]
+    fn gate_token_operacion_gratis_no_exige_token() {
+        // estimate_search(0) = 0 unidades => gratis => pasa sin token.
+        let store = ConfirmStore::new();
+        let free = sdp_core::cost::estimate_search(0);
+        assert!(!free.requires_confirmation);
+        let r = ensure_confirmed_token(&store, "run_search", &free, 0, None);
+        assert!(r.is_ok(), "una operación gratis no debe exigir confirmación");
+    }
+
+    #[test]
+    fn gate_token_operacion_cara_sin_token_falla() {
+        // estimate_search(1) = 100 unidades => requiere confirmación.
+        let store = ConfirmStore::new();
+        let gated = sdp_core::cost::estimate_search(1);
+        assert!(gated.requires_confirmation);
+        let r = ensure_confirmed_token(&store, "run_search", &gated, 7, None);
+        assert!(
+            matches!(r, Err(CommandError::NeedsConfirmation(_))),
+            "operación cara sin token debe rechazarse"
+        );
+    }
+
+    #[test]
+    fn gate_token_emitido_y_consumido_una_sola_vez() {
+        let store = ConfirmStore::new();
+        let gated = sdp_core::cost::estimate_search(1);
+        // estimate_* emite el token...
+        let issued = confirmable(&store, "run_search", gated.clone(), 7);
+        let token = issued.confirmation_token.expect("debe emitir token");
+        // ...run_* lo consume con el MISMO fingerprint: pasa.
+        assert!(ensure_confirmed_token(&store, "run_search", &gated, 7, Some(&token)).is_ok());
+        // Replay del mismo token: ya consumido => falla.
+        assert!(matches!(
+            ensure_confirmed_token(&store, "run_search", &gated, 7, Some(&token)),
+            Err(CommandError::NeedsConfirmation(_))
+        ));
+    }
+
+    #[test]
+    fn gate_token_con_corpus_distinto_no_sirve() {
+        // Confirmó sobre un corpus_hash y al ejecutar cambió (TOCTOU): rechazo.
+        let store = ConfirmStore::new();
+        let gated = sdp_core::cost::estimate_search(1);
+        let issued = confirmable(&store, "run_search", gated.clone(), 100);
+        let token = issued.confirmation_token.unwrap();
+        let r = ensure_confirmed_token(&store, "run_search", &gated, 999, Some(&token));
+        assert!(matches!(r, Err(CommandError::NeedsConfirmation(_))));
+    }
+
+    #[test]
+    fn missing_video_ids_deduplica_y_preserva_orden() {
+        let requested = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ];
+        let returned = vec![VideoMeta {
+            video_id: "b".into(),
+            channel_id: "ch".into(),
+            title: "t".into(),
+            description: String::new(),
+            tags: vec![],
+            view_count: None,
+            like_count: None,
+            comment_count: None,
+            published_at: chrono::Utc::now(),
+        }];
+        // "b" volvió; faltan "a" (deduplicado) y "c", en orden de aparición.
+        assert_eq!(missing_video_ids(&requested, &returned), vec!["a", "c"]);
+    }
 }

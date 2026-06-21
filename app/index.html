@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="app">
+    <div class="app" id="app-root">
       <aside class="panel" aria-label="Analizar">
         <div class="brand">
           <span class="brand__mark" aria-hidden="true"></span>
@@ -280,7 +280,7 @@
     <!-- Gate de costo: modal que muestra el costo estimado antes de ejecutar
          una operación cara (F9/F10). La key vive solo en el input password. -->
     <div id="cost-modal" class="modal" hidden>
-      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="cost-title">
+      <div class="modal__card" role="dialog" aria-modal="true" aria-labelledby="cost-title" tabindex="-1">
         <h3 id="cost-title" class="modal__title">¿Continuar?</h3>
         <p id="cost-summary" class="modal__summary"></p>
         <ul id="cost-breakdown" class="modal__lines"></ul>

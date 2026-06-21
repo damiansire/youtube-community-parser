@@ -5,6 +5,7 @@ const invoke = window.__TAURI__?.core?.invoke;
 
 const $ = (id) => document.getElementById(id);
 const els = {
+  appRoot: $("app-root"),
   form: $("form"),
   target: $("target"),
   apikey: $("apikey"),
@@ -80,8 +81,12 @@ function renderSpectrum(ranking) {
     cell.addEventListener("mouseenter", () => (els.spectrumTip.textContent = tip));
     els.spectrum.appendChild(cell);
   });
-  els.spectrum.addEventListener("mouseleave", () => (els.spectrumTip.innerHTML = "&nbsp;"));
 }
+
+// El contenedor #spectrum-bar es persistente entre renders: registrar el
+// mouseleave acá (idempotente con `onmouseleave =`) evita acumular un listener
+// nuevo por cada análisis, que retenía closures sin techo (auditoría P17).
+els.spectrum.onmouseleave = () => (els.spectrumTip.innerHTML = "&nbsp;");
 
 function rosterRow(s, rank, champ) {
   const li = document.createElement("li");
@@ -206,11 +211,17 @@ function formatCost(kind) {
 }
 
 // Gate de costo en la UI (estimar -> confirmar -> ejecutar). Si la operación es
-// gratis (requires_confirmation = false) resuelve true sin molestar; si cuesta,
-// muestra el modal con el desglose y espera la decisión del usuario.
+// gratis (requires_confirmation = false) resuelve { token: null } sin molestar;
+// si cuesta, muestra el modal y, al confirmar, resuelve con el token de un solo
+// uso que emitió el backend (auditoría P1). Cancelar resuelve { cancelled: true }.
+//
+// El token NO se inventa en el front: viene del estimate y el backend lo valida
+// y consume, así que un `confirmed:true` crudo ya no alcanza para gastar.
 function confirmCost(estimate) {
   return new Promise((resolve) => {
-    if (!estimate.requires_confirmation) return resolve(true);
+    if (!estimate.requires_confirmation) {
+      return resolve({ token: estimate.confirmation_token ?? null });
+    }
     tools.costSummary.textContent = `Esta operación cuesta ${formatCost(estimate.kind)}.`;
     tools.costBreakdown.innerHTML = "";
     estimate.breakdown.forEach((line) => {
@@ -218,16 +229,71 @@ function confirmCost(estimate) {
       li.textContent = `${line.label} · ${formatCost(line.kind)}`;
       tools.costBreakdown.appendChild(li);
     });
-    tools.modal.hidden = false;
-    const finish = (ok) => {
-      tools.modal.hidden = true;
+    openModal();
+    const finish = (result) => {
+      closeModal();
       tools.costConfirm.onclick = null;
       tools.costCancel.onclick = null;
-      resolve(ok);
+      document.removeEventListener("keydown", onKeydown, true);
+      resolve(result);
     };
-    tools.costConfirm.onclick = () => finish(true);
-    tools.costCancel.onclick = () => finish(false);
+    const onKeydown = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish({ cancelled: true });
+      } else if (e.key === "Tab") {
+        trapTab(e);
+      }
+    };
+    document.addEventListener("keydown", onKeydown, true);
+    tools.costConfirm.onclick = () =>
+      finish({ token: estimate.confirmation_token ?? null });
+    tools.costCancel.onclick = () => finish({ cancelled: true });
   });
+}
+
+// --- Accesibilidad del modal del gate de dinero (auditoría P11) ---------------
+// Foco inicial al diálogo, focus-trap en Tab/Shift+Tab, Escape para cancelar y
+// restauración del foco al cerrar. El único gate antes de gastar US$ debe ser
+// operable por teclado y lector de pantalla.
+let modalPrevFocus = null;
+const focusableInModal = () =>
+  Array.from(
+    tools.modal.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((el) => !el.disabled && el.offsetParent !== null);
+
+function openModal() {
+  modalPrevFocus = document.activeElement;
+  tools.modal.hidden = false;
+  // El resto de la app queda inerte para lectores de pantalla mientras el gate
+  // está abierto (no se puede operar el fondo antes de decidir).
+  if (els.appRoot) els.appRoot.setAttribute("aria-hidden", "true");
+  (focusableInModal()[0] || tools.modal).focus();
+}
+
+function closeModal() {
+  tools.modal.hidden = true;
+  if (els.appRoot) els.appRoot.removeAttribute("aria-hidden");
+  if (modalPrevFocus && typeof modalPrevFocus.focus === "function") {
+    modalPrevFocus.focus();
+  }
+  modalPrevFocus = null;
+}
+
+function trapTab(e) {
+  const items = focusableInModal();
+  if (items.length === 0) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
 }
 
 // Nube de keywords: el tamaño/opacidad del chip escala con el peso tf-idf.
@@ -303,14 +369,27 @@ async function fetchMeta() {
   try {
     // estimar -> confirmar -> ejecutar (re-estimado server-side en el backend).
     const estimate = await invoke("estimate_video_meta", { ids });
-    if (!(await confirmCost(estimate))) {
+    const decision = await confirmCost(estimate);
+    if (decision.cancelled) {
       setStatus("Cancelado: no se gastó cuota.");
       return;
     }
     setStatus("Trayendo metadata…");
-    const videos = await invoke("fetch_video_meta", { ids, apiKey, confirmed: true });
-    renderVideos(videos);
-    setStatus(`Metadata de ${videos.length} video${videos.length === 1 ? "" : "s"}.`);
+    const result = await invoke("fetch_video_meta", {
+      ids,
+      apiKey,
+      confirmationToken: decision.token,
+    });
+    renderVideos(result.videos);
+    const n = result.videos.length;
+    const missing = result.missing_ids || [];
+    let msg = `Metadata de ${n} video${n === 1 ? "" : "s"}.`;
+    if (missing.length) {
+      // La API omite IDs inexistentes/privados: lo avisamos en vez de mostrar
+      // solo videos.length (auditoría P12).
+      msg += ` ${missing.length} ID${missing.length === 1 ? "" : "s"} no encontrado${missing.length === 1 ? "" : "s"}.`;
+    }
+    setStatus(msg, missing.length ? "error" : undefined);
   } catch (err) {
     setStatus(String(err), "error");
   } finally {
@@ -406,12 +485,17 @@ async function refineIdeasAi() {
   try {
     // estimar -> confirmar -> ejecutar. El modal ya muestra "~US$X" para Money.
     const estimate = await invoke("estimate_ideas_ai", { provider });
-    if (!(await confirmCost(estimate))) {
+    const decision = await confirmCost(estimate);
+    if (decision.cancelled) {
       setStatus("Cancelado: no se gastó dinero.");
       return;
     }
     setStatus("Refinando con IA…");
-    const refined = await invoke("refine_ideas_ai", { provider, apiKey, confirmed: true });
+    const refined = await invoke("refine_ideas_ai", {
+      provider,
+      apiKey,
+      confirmationToken: decision.token,
+    });
     if (!refined.length) {
       setStatus("La IA no devolvió ideas; generá ideas heurísticas primero.", "error");
       tools.aiIdeasOut.hidden = true;
@@ -671,12 +755,17 @@ async function runSearch() {
   search.run.disabled = true;
   try {
     const estimate = await invoke("estimate_search", { plan });
-    if (!(await confirmCost(estimate))) {
+    const decision = await confirmCost(estimate);
+    if (decision.cancelled) {
       setStatus("Cancelado: no se gastó cuota.");
       return;
     }
     setStatus("Buscando…");
-    const result = await invoke("run_search", { plan, apiKey, confirmed: true });
+    const result = await invoke("run_search", {
+      plan,
+      apiKey,
+      confirmationToken: decision.token,
+    });
     renderHits(result.hits);
     const base = `${result.hits.length} resultado${result.hits.length === 1 ? "" : "s"}.`;
     if (result.incomplete) {
