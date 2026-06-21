@@ -313,6 +313,55 @@ body {
 }
 .seo-missing { display: flex; flex-direction: column; gap: 4px; }
 
+/* ---------- benchmark de competidores (F11) ---------- */
+.bench-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end; }
+.bench { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.bench .corpus__sub { margin: 8px 0 2px; }
+.bench .corpus__sub:first-child { margin-top: 0; }
+
+/* Tabla comparativa: reusa .table; la fila "vos" lleva el realce dorado (mismo
+   lenguaje que el champ del roster) y "Canal" no se trunca a la fuerza. */
+.bench-table .bench-chan { font-weight: 600; }
+.bench-table tr.bench-mine td { background: var(--gold-soft); }
+.bench-table tr.bench-mine:hover td { background: var(--gold-soft); }
+.bench-table tr.bench-mine .bench-chan { color: #8a5600; }
+.bench-you {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; background: var(--gold); color: #5a3a00; margin-left: 6px;
+}
+
+/* Brechas: misma estructura que los findings de SEO (píldora de tipo + cuerpo),
+   una variante de color por tipo de brecha. */
+.bench-gaps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.bench-gap {
+  display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 12px;
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #fbfbfe;
+  border-left: 3px solid var(--line);
+}
+.bench-gap__kind {
+  flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.bench-gap--keywords { border-left-color: var(--accent); }
+.bench-gap--keywords .bench-gap__kind { background: var(--accent-soft); color: var(--accent); }
+.bench-gap--cadence { border-left-color: var(--gold); }
+.bench-gap--cadence .bench-gap__kind { background: var(--gold-soft); color: #8a5600; }
+.bench-gap--engagement { border-left-color: #2156c4; }
+.bench-gap--engagement .bench-gap__kind { background: #e6f0ff; color: #2156c4; }
+.bench-gap--nodata { border-left-color: var(--quiet); }
+.bench-gap--nodata .bench-gap__kind { background: #efeef6; color: var(--muted); }
+.bench-gap__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bench-gap__chan {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--quiet); word-break: break-all;
+}
+.bench-gap__detail { font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+
+.bench-clean {
+  margin: 0; padding: 12px 14px; font-size: 13.5px; font-weight: 600;
+  color: var(--accent); background: var(--accent-soft); border-radius: 12px;
+}
+
 /* ---------- gate de costo: modal ---------- */
 .modal {
   position: fixed; inset: 0; display: grid; place-items: center; z-index: 50;
@@ -338,6 +387,7 @@ body {
   .panel { border-right: 0; border-bottom: 1px solid var(--line); }
   .rosters { grid-template-columns: 1fr; }
   .tools__grid { grid-template-columns: 1fr; }
+  .bench-row { grid-template-columns: 1fr; }
   .stage { padding: 28px 20px; }
 }
 

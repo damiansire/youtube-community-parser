@@ -190,6 +190,33 @@
             <div id="seo-out" class="seo" hidden></div>
           </article>
 
+          <!-- Benchmark de competidores (F11): compara tu canal contra
+               competidores usando datos YA ingestados (metadata local). Gratis:
+               no gasta cuota, mina lo que ya tenés. Tabla comparativa + brechas
+               accionables. -->
+          <article class="tool tool--wide">
+            <header class="tool__head">
+              <h3 class="tool__name">Benchmark de competidores</h3>
+              <span class="tag tag--free">gratis</span>
+            </header>
+            <p class="tool__desc">Compará tu canal contra competidores y mirá
+              dónde estás por debajo. Sin costo: usa los datos ya ingestados.</p>
+            <div class="bench-row">
+              <div class="field">
+                <label for="bench-mine">Mi canal (channel ID)</label>
+                <input id="bench-mine" type="text" placeholder="UCxxxxxxxxxxxxxxxxxxxxxx"
+                  autocomplete="off" spellcheck="false" />
+              </div>
+              <div class="field">
+                <label for="bench-rivals">Competidores (IDs, coma/espacio)</label>
+                <input id="bench-rivals" type="text" placeholder="UCaaa..., UCbbb..."
+                  autocomplete="off" spellcheck="false" />
+              </div>
+            </div>
+            <button id="bench-run" class="btn" type="button">Comparar</button>
+            <div id="bench-out" class="bench" hidden></div>
+          </article>
+
           <article class="tool tool--wide">
             <header class="tool__head">
               <h3 class="tool__name">Buscar videos / trending</h3>

@@ -460,6 +460,117 @@ async function auditSeo() {
   }
 }
 
+// ---------- Benchmark de competidores (F11: comparativa local, gratis) ----------
+
+const bench = {
+  mine: $("bench-mine"),
+  rivals: $("bench-rivals"),
+  run: $("bench-run"),
+  out: $("bench-out"),
+};
+
+// Tipo de brecha -> etiqueta ES + variante de color. Mismo vocabulario visual
+// que las píldoras de severidad/señal: índigo (acento) para lo medible, dorado
+// para cadencia, rojo para "sin datos".
+const GAP_KINDS = {
+  MissingKeywords: { label: "Keywords", mod: "keywords" },
+  Cadence: { label: "Cadencia", mod: "cadence" },
+  Engagement: { label: "Engagement", mod: "engagement" },
+  NoData: { label: "Sin datos", mod: "nodata" },
+};
+
+// Promedios enteros (vistas/likes/comentarios): "—" si null, miles con es-AR.
+const fmtAvg = (n) => (n == null ? "—" : Math.round(n).toLocaleString("es-AR"));
+// Cadencia: un decimal, "—" si null.
+const fmtCadence = (n) => (n == null ? "—" : n.toFixed(1));
+
+// Una fila de la tabla por canal. `mine` lleva el realce dorado (como el champ
+// del roster) y la etiqueta "vos". channel_id es dato de terceros: escapeHtml.
+function benchRow(profile, mine) {
+  const tag = mine ? ` <span class="bench-you">vos</span>` : "";
+  return `
+    <tr${mine ? ' class="bench-mine"' : ""}>
+      <td class="bench-chan">${escapeHtml(profile.channel_id)}${tag}</td>
+      <td class="num">${profile.video_count}</td>
+      <td class="num">${fmtAvg(profile.avg_views)}</td>
+      <td class="num">${fmtAvg(profile.avg_likes)}</td>
+      <td class="num">${fmtAvg(profile.avg_comments)}</td>
+      <td class="num">${fmtCadence(profile.posting_cadence_days)}</td>
+    </tr>`;
+}
+
+function renderBenchmark(report) {
+  // Tabla comparativa: primero "vos", luego competidores. Reusa el estilo .table.
+  const rows = [benchRow(report.mine, true)]
+    .concat((report.competitors || []).map((c) => benchRow(c, false)))
+    .join("");
+  const table = `
+    <div class="table-wrap">
+      <table class="table bench-table">
+        <thead>
+          <tr>
+            <th>Canal</th>
+            <th class="num">Videos</th>
+            <th class="num">Vistas prom.</th>
+            <th class="num">Likes prom.</th>
+            <th class="num">Coment. prom.</th>
+            <th class="num">Cadencia (días)</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+
+  // Brechas accionables: una píldora de tipo + competidor + detalle (escapeHtml
+  // en competitor_id y detail: datos de terceros).
+  const gaps = report.gaps || [];
+  const gapsBlock = gaps.length
+    ? `<ul class="bench-gaps">${gaps
+        .map((g) => {
+          const k = GAP_KINDS[g.kind] || { label: g.kind, mod: "nodata" };
+          return `
+            <li class="bench-gap bench-gap--${k.mod}">
+              <span class="bench-gap__kind">${k.label}</span>
+              <span class="bench-gap__body">
+                <span class="bench-gap__chan">${escapeHtml(g.competitor_id)}</span>
+                <span class="bench-gap__detail">${escapeHtml(g.detail)}</span>
+              </span>
+            </li>`;
+        })
+        .join("")}</ul>`
+    : `<p class="bench-clean">Vas a la par o mejor que tus competidores en lo medido.</p>`;
+
+  bench.out.innerHTML = `
+    <h4 class="corpus__sub">Comparativa</h4>
+    ${table}
+    <h4 class="corpus__sub">Brechas accionables</h4>
+    ${gapsBlock}`;
+  bench.out.hidden = false;
+}
+
+async function runBenchmark() {
+  const myId = bench.mine.value.trim();
+  // Competidores: parseo por coma/espacio, sin vacíos (mismo patrón que IDs/tags).
+  const competitorIds = bench.rivals.value.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  if (!myId) return setStatus("Pegá el channel ID de tu canal.", "error");
+  if (!competitorIds.length) return setStatus("Pegá al menos un competidor.", "error");
+
+  bench.run.disabled = true;
+  setStatus("Comparando con la competencia…");
+  try {
+    const report = await invoke("benchmark_channels", { myId, competitorIds });
+    renderBenchmark(report);
+    const n = report.gaps ? report.gaps.length : 0;
+    setStatus(n
+      ? `${n} brecha${n === 1 ? "" : "s"} frente a ${competitorIds.length} competidor${competitorIds.length === 1 ? "" : "es"}.`
+      : `A la par o mejor que ${competitorIds.length} competidor${competitorIds.length === 1 ? "" : "es"}.`);
+  } catch (err) {
+    setStatus(String(err), "error");
+  } finally {
+    bench.run.disabled = false;
+  }
+}
+
 // ---------- Búsqueda / trending (F10, operación cara: 100u/página) ----------
 
 const search = {
@@ -533,6 +644,7 @@ tools.corpusRun.addEventListener("click", analyzeCorpus);
 tools.metaRun.addEventListener("click", fetchMeta);
 tools.ideasRun.addEventListener("click", mineIdeas);
 seo.run.addEventListener("click", auditSeo);
+bench.run.addEventListener("click", runBenchmark);
 search.run.addEventListener("click", runSearch);
 search.pages.addEventListener("input", updateSearchCost);
 updateSearchCost();
@@ -545,5 +657,6 @@ if (!invoke) {
   tools.metaRun.disabled = true;
   tools.ideasRun.disabled = true;
   seo.run.disabled = true;
+  bench.run.disabled = true;
   search.run.disabled = true;
 }
