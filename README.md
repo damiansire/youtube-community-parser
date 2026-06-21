@@ -13,7 +13,7 @@ sí. Usalo de forma ética y por el bien común.
 canal / video
    │
    ▼
-[ ingest ]      sidecar Node que envuelve youtube-fast-api → JSON
+[ ingest ]      sidecar Node: cliente directo de la YouTube Data API v3 (https nativo, sin deps) → JSON
    │
    ▼
 [ sdp-core ]    dominio puro en Rust: modelos + rankings (testeable, sin UI)
@@ -28,7 +28,7 @@ canal / video
 | Carpeta      | Qué es                                                                 |
 |--------------|------------------------------------------------------------------------|
 | `crates/core`| Dominio: `Commenter`, `Comment` y los rankings. Sin red ni UI.         |
-| `ingest`     | Sidecar Node sobre [`youtube-fast-api`](https://www.npmjs.com/package/youtube-fast-api). |
+| `ingest`     | Sidecar Node: cliente directo de la [YouTube Data API v3](https://developers.google.com/youtube/v3) (`https` nativo, sin dependencias). |
 | `src-tauri`  | Backend de la app de escritorio (Tauri v2).                            |
 | `app`        | Frontend del webview.                                                  |
 | `legacy`     | Script Node original (2021), preservado por historia.                  |

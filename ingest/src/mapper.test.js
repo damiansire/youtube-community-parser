@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { mapComments, toComment } = require("./mapper");
 
-// Forma cruda tal como la devuelve youtube-fast-api (getAllComments).
+// Forma cruda tal como la produce `youtube.js` (flattenThread) desde la API.
 const RAW = [
   {
     id: "c1",

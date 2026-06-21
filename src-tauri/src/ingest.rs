@@ -1,4 +1,4 @@
-//! Puente con el sidecar de Node (`youtube-fast-api`).
+//! Puente con el sidecar de Node (cliente directo de la YouTube Data API v3).
 //!
 //! El dominio (`sdp-core`) es puro; acá vive el efecto: spawnear el proceso
 //! Node, pasarle la API key por entorno y parsear su JSON a tipos del core.

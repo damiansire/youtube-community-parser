@@ -1,7 +1,7 @@
 //! Modelos de dominio.
 //!
-//! Reflejan la forma de los datos que devuelve `youtube-fast-api`
-//! (ver `getAllComments`), pero desacoplados de la fuente: el dominio
+//! Reflejan la forma de los datos que devuelve la YouTube Data API v3
+//! (ver el sidecar `ingest`), pero desacoplados de la fuente: el dominio
 //! no sabe si los comentarios vienen de la API, de un import o de la base.
 
 use chrono::{DateTime, Utc};

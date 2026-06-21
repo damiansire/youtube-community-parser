@@ -5,7 +5,7 @@
 //
 // Es función pura (sin red) para poder testearla con fixtures.
 
-/** @param {object} raw comentario crudo de youtube-fast-api */
+/** @param {object} raw comentario crudo (ver `youtube.js` flattenThread) */
 function toComment(raw) {
   return {
     id: String(raw.id),
@@ -18,7 +18,7 @@ function toComment(raw) {
   };
 }
 
-/** @param {object} raw comentario crudo de youtube-fast-api */
+/** @param {object} raw comentario crudo (ver `youtube.js` flattenThread) */
 function toCommenter(raw) {
   return {
     channel_id: String(raw.authorChannelId),
