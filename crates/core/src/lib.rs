@@ -3,6 +3,7 @@
 //! Sin dependencias de Tauri, red ni base de datos: solo modelos y la lógica
 //! para responder *quiénes comentan más y quiénes menos*. Se testea sin UI.
 
+pub mod benchmark;
 pub mod cost;
 pub mod ideas;
 pub mod models;
@@ -10,6 +11,9 @@ pub mod ranking;
 pub mod seo;
 pub mod text;
 
+pub use benchmark::{
+    benchmark, profile_channel, BenchmarkGap, BenchmarkGapKind, BenchmarkReport, ChannelProfile,
+};
 pub use cost::{
     estimate_search, estimate_video_meta, needs_optin, CostEstimate, CostKind, CostLine, CostPolicy,
 };
