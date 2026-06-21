@@ -25,3 +25,10 @@ tokio.workspace = true
 secrecy.workspace = true
 urlencoding.workspace = true
 sdp-core = { path = "../crates/core" }
+sdp-storage = { path = "../crates/storage" }
+
+[dev-dependencies]
+# Servidor HTTP mockeado para testear el cliente de YouTube sin red ni API key.
+wiremock = "0.6"
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "rt"] }
