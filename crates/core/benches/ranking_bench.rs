@@ -14,7 +14,7 @@
 use std::time::Instant;
 
 use chrono::{DateTime, TimeZone, Utc};
-use sdp_core::{least_active, most_active, models::Comment, models::Commenter, rank_commenters};
+use sdp_core::{least_active, models::Comment, models::Commenter, most_active, rank_commenters};
 
 // ---------------------------------------------------------------------------
 // Medición de memoria del proceso (Windows, sin crates externos)
@@ -171,7 +171,10 @@ fn run_for(n: usize, unique: usize) {
 
 fn main() {
     println!("== Medición Fase 2 (F4) — ranking in-memory de sdp-core ==");
-    println!("Plataforma: {} | perfil release (cargo bench)", std::env::consts::OS);
+    println!(
+        "Plataforma: {} | perfil release (cargo bench)",
+        std::env::consts::OS
+    );
     println!("Nota: 'most_active' y 'least_active' recalculan rank_commenters internamente (F5: ranking x3).\n");
 
     // Caso A: muchos comentarios, audiencia mediana (cardinalidad ~10% de N).
