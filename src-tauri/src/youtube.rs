@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use sdp_core::{Comment, Commenter};
+use sdp_core::{Comment, Commenter, SearchHit, SearchPlan, VideoMeta};
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -28,7 +28,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum YoutubeError {
     #[error("error de red hablando con la YouTube Data API: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("la YouTube Data API respondió error{}: {message}", reason_suffix(reason))]
+    #[error(
+        "la YouTube Data API respondió error{}: {message}",
+        reason_suffix(reason)
+    )]
     Api {
         status: u16,
         reason: Option<String>,
@@ -223,6 +226,82 @@ struct PlaylistItemContentDetails {
     video_id: Option<String>,
 }
 
+// --- videos.list (F9): metadata de videos (1 unidad por request, hasta 50 ids).
+// Consumido por `fetch_video_meta`, cableado en `lib.rs` detrás del gate de costo.
+
+#[derive(Debug, Deserialize)]
+struct VideoListResponse {
+    #[serde(default)]
+    items: Vec<VideoItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoItem {
+    id: String,
+    snippet: VideoSnippet,
+    /// Ausente si el video oculta sus estadísticas.
+    #[serde(default)]
+    statistics: Option<VideoStatistics>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoSnippet {
+    #[serde(rename = "channelId")]
+    channel_id: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<DateTime<Utc>>,
+}
+
+/// Las cuentas vienen como **string** en la API (no número): se parsean en el
+/// mapeo puro. Si el video las oculta, el objeto entero falta.
+#[derive(Debug, Deserialize)]
+struct VideoStatistics {
+    #[serde(rename = "viewCount", default)]
+    view_count: Option<String>,
+    #[serde(rename = "likeCount", default)]
+    like_count: Option<String>,
+    #[serde(rename = "commentCount", default)]
+    comment_count: Option<String>,
+}
+
+// --- search.list (F10): descubrimiento/trending (100 unidades por página).
+// Consumido por `search`, cableado en `lib.rs` detrás del gate de costo (run_search).
+
+#[derive(Debug, Deserialize)]
+struct SearchListResponse {
+    #[serde(default)]
+    items: Vec<SearchItem>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchItem {
+    id: SearchId,
+    snippet: SearchSnippet,
+}
+
+/// `search.list` puede devolver canales o playlists además de videos; sólo nos
+/// quedamos con los que traen `videoId` (ver `search_item_to_hit`).
+#[derive(Debug, Deserialize)]
+struct SearchId {
+    #[serde(rename = "videoId")]
+    video_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchSnippet {
+    #[serde(rename = "channelId")]
+    channel_id: Option<String>,
+    title: Option<String>,
+    #[serde(rename = "publishedAt")]
+    published_at: Option<DateTime<Utc>>,
+}
+
 // ---------------------------------------------------------------------------
 // Mapeo PURO (sin red) — testeable con fixtures.
 // ---------------------------------------------------------------------------
@@ -273,6 +352,51 @@ fn collect(threads: &[CommentThread]) -> (Vec<Comment>, Vec<Commenter>) {
         comments.push(comment);
     }
     (comments, commenters)
+}
+
+/// Mapea un `videos.list` item al modelo de dominio `VideoMeta` (F9). PURO:
+/// testeable con un fixture JSON sin red. Las cuentas vienen como string en la
+/// API y acá se parsean a `u64`; si el video oculta estadísticas quedan en
+/// `None` (no se inventan ceros).
+fn video_item_to_meta(item: &VideoItem) -> VideoMeta {
+    let s = &item.snippet;
+    let stats = item.statistics.as_ref();
+    let count = |field: &Option<String>| field.as_ref().and_then(|n| n.parse::<u64>().ok());
+    VideoMeta {
+        video_id: item.id.clone(),
+        channel_id: s.channel_id.clone().unwrap_or_default(),
+        title: s.title.clone().unwrap_or_default(),
+        description: s.description.clone().unwrap_or_default(),
+        tags: s.tags.clone(),
+        view_count: stats.and_then(|st| count(&st.view_count)),
+        like_count: stats.and_then(|st| count(&st.like_count)),
+        comment_count: stats.and_then(|st| count(&st.comment_count)),
+        published_at: s.published_at.unwrap_or_else(Utc::now),
+    }
+}
+
+/// Mapea un item de `search.list` a `SearchHit` (F10). Devuelve `None` para los
+/// resultados que no son videos (canales/playlists: sin `videoId`), que el
+/// llamador descarta. PURO.
+fn search_item_to_hit(item: &SearchItem) -> Option<SearchHit> {
+    let video_id = item.id.video_id.clone()?;
+    let s = &item.snippet;
+    Some(SearchHit {
+        video_id,
+        channel_id: s.channel_id.clone().unwrap_or_default(),
+        title: s.title.clone().unwrap_or_default(),
+        published_at: s.published_at.unwrap_or_else(Utc::now),
+    })
+}
+
+/// Resultado de una búsqueda (F10). Igual que [`Ingested`], `incomplete` marca
+/// que se cortó por cuota (`quotaExceeded`) devolviendo lo parcial ya pagado,
+/// en vez de descartar el progreso.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    pub incomplete: bool,
+    pub incomplete_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +511,10 @@ impl YoutubeClient {
         max_videos: Option<usize>,
     ) -> Result<(Vec<String>, bool), YoutubeError> {
         let channels: ChannelList = self
-            .get("channels", &[("id", channel_id), ("part", "contentDetails")])
+            .get(
+                "channels",
+                &[("id", channel_id), ("part", "contentDetails")],
+            )
             .await?;
         let uploads = channels
             .items
@@ -483,7 +610,9 @@ impl YoutubeClient {
 
         for video_id in &video_ids {
             // Presupuesto de comentarios que todavía caben (global al canal).
-            let remaining = limits.max_comments.map(|max| max.saturating_sub(threads.len()));
+            let remaining = limits
+                .max_comments
+                .map(|max| max.saturating_sub(threads.len()));
             if limits.comments_reached(threads.len()) {
                 incomplete = true;
                 incomplete_reason = Some(limit_reason("comentarios"));
@@ -523,6 +652,89 @@ impl YoutubeClient {
             comments,
             incomplete,
             incomplete_reason,
+        })
+    }
+
+    /// Trae metadata de videos por id (F9, `videos.list`). La API acepta hasta
+    /// **50 ids por request** (cada request = 1 unidad de cuota), así que los
+    /// `ids` se parten en chunks de 50 y se concatenan los resultados.
+    ///
+    /// Es una operación barata pero de red: el gate de costo (estimar →
+    /// confirmar) y la persistencia viven en capas de arriba (`lib.rs` /
+    /// `sdp-storage`); acá solo el efecto de red + mapeo puro (boundary).
+    ///
+    /// No falla por ids inexistentes: la API simplemente los omite de `items`,
+    /// así que el resultado puede tener menos elementos que `ids`.
+    pub async fn fetch_video_meta(&self, ids: &[String]) -> Result<Vec<VideoMeta>, YoutubeError> {
+        let mut out = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(50) {
+            let joined = chunk.join(",");
+            let list: VideoListResponse = self
+                .get(
+                    "videos",
+                    &[("id", joined.as_str()), ("part", "snippet,statistics")],
+                )
+                .await?;
+            out.extend(list.items.iter().map(video_item_to_meta));
+        }
+        Ok(out)
+    }
+
+    /// Búsqueda/trending (F10, `search.list`). **Cara**: 100 unidades por página,
+    /// por eso `plan.max_pages` es el tope de costo (el gate lo confirma antes).
+    ///
+    /// Reusa la resiliencia de cuota (F4): ante `quotaExceeded` a mitad de la
+    /// paginación devuelve lo parcial con `incomplete = true` en vez de fallar.
+    /// Cualquier otro error de red sí se propaga. `max_pages = 0` no toca la red.
+    pub async fn search(&self, plan: &SearchPlan) -> Result<SearchResults, YoutubeError> {
+        // `trending` ordena por lo más visto; si no, por relevancia textual.
+        let order = if plan.trending {
+            "viewCount"
+        } else {
+            "relevance"
+        };
+        let mut hits = Vec::new();
+        let mut page_token = String::new();
+        let mut pages = 0u32;
+
+        while pages < plan.max_pages {
+            let list: SearchListResponse = match self
+                .get(
+                    "search",
+                    &[
+                        ("q", plan.query.as_str()),
+                        ("part", "snippet"),
+                        ("type", "video"),
+                        ("order", order),
+                        ("maxResults", "50"),
+                        ("pageToken", &page_token),
+                    ],
+                )
+                .await
+            {
+                Ok(list) => list,
+                Err(e) if e.is_quota_exceeded() => {
+                    // Cuota agotada a mitad: conservamos lo ya traído.
+                    return Ok(SearchResults {
+                        hits,
+                        incomplete: true,
+                        incomplete_reason: Some(e.to_string()),
+                    });
+                }
+                Err(e) => return Err(e),
+            };
+            pages += 1;
+            hits.extend(list.items.iter().filter_map(search_item_to_hit));
+            match list.next_page_token {
+                Some(t) if pages < plan.max_pages => page_token = t,
+                _ => break,
+            }
+        }
+
+        Ok(SearchResults {
+            hits,
+            incomplete: false,
+            incomplete_reason: None,
         })
     }
 }
@@ -592,7 +804,10 @@ mod tests {
         assert_eq!(comment.like_count, 5);
         assert_eq!(commenter.channel_id, "UCana");
         assert_eq!(commenter.display_name, "Ana");
-        assert_eq!(commenter.profile_image_url.as_deref(), Some("http://img/ana.png"));
+        assert_eq!(
+            commenter.profile_image_url.as_deref(),
+            Some("http://img/ana.png")
+        );
     }
 
     #[test]
@@ -657,7 +872,10 @@ mod tests {
         // SecretString no debe imprimir el valor en claro (F2).
         let key = SecretString::from("AIza-super-secreta".to_string());
         let dbg = format!("{key:?}");
-        assert!(!dbg.contains("AIza-super-secreta"), "la key se filtró: {dbg}");
+        assert!(
+            !dbg.contains("AIza-super-secreta"),
+            "la key se filtró: {dbg}"
+        );
     }
 
     #[test]
@@ -689,7 +907,103 @@ mod tests {
     fn limit_reason_es_legible_y_marca_parcial() {
         let r = limit_reason("comentarios");
         assert!(r.contains("comentarios"));
-        assert!(r.contains("parciales"), "el motivo debe avisar que es parcial: {r}");
+        assert!(
+            r.contains("parciales"),
+            "el motivo debe avisar que es parcial: {r}"
+        );
+    }
+
+    // Fixture: un item de videos.list (part=snippet,statistics) tal como lo
+    // devuelve la API; ojo: las cuentas vienen como STRING.
+    const VIDEO_ITEM_JSON: &str = r#"{
+      "id": "vid1",
+      "snippet": {
+        "channelId": "UCcanal",
+        "title": "Cómo usar señales en Angular",
+        "description": "Tutorial completo",
+        "tags": ["angular", "signals"],
+        "publishedAt": "2021-09-27T03:00:00Z"
+      },
+      "statistics": {
+        "viewCount": "1234",
+        "likeCount": "56",
+        "commentCount": "7"
+      }
+    }"#;
+
+    #[test]
+    fn mapea_video_item_a_meta_con_cuentas_string() {
+        let item: VideoItem = serde_json::from_str(VIDEO_ITEM_JSON).unwrap();
+        let meta = video_item_to_meta(&item);
+        assert_eq!(meta.video_id, "vid1");
+        assert_eq!(meta.channel_id, "UCcanal");
+        assert_eq!(meta.title, "Cómo usar señales en Angular");
+        assert_eq!(meta.tags, vec!["angular", "signals"]);
+        // Clave: "1234" string -> 1234 u64.
+        assert_eq!(meta.view_count, Some(1234));
+        assert_eq!(meta.like_count, Some(56));
+        assert_eq!(meta.comment_count, Some(7));
+    }
+
+    #[test]
+    fn video_sin_statistics_mapea_a_none() {
+        // Video con estadísticas ocultas: sin objeto `statistics`.
+        let json = r#"{
+          "id": "vid2",
+          "snippet": {
+            "channelId": "UCcanal",
+            "title": "Privado",
+            "publishedAt": "2021-09-27T03:00:00Z"
+          }
+        }"#;
+        let item: VideoItem = serde_json::from_str(json).unwrap();
+        let meta = video_item_to_meta(&item);
+        assert_eq!(meta.view_count, None);
+        assert_eq!(meta.like_count, None);
+        assert_eq!(meta.comment_count, None);
+        assert!(meta.tags.is_empty());
+        assert!(meta.description.is_empty());
+    }
+
+    #[test]
+    fn parsea_lista_de_videos() {
+        let list: VideoListResponse =
+            serde_json::from_str(&format!(r#"{{ "items": [{VIDEO_ITEM_JSON}] }}"#)).unwrap();
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].id, "vid1");
+    }
+
+    #[test]
+    fn mapea_search_item_video_a_hit() {
+        let item: SearchItem = serde_json::from_str(
+            r#"{
+              "id": { "videoId": "v1" },
+              "snippet": {
+                "channelId": "UCotro",
+                "title": "Competencia",
+                "publishedAt": "2021-09-27T03:00:00Z"
+              }
+            }"#,
+        )
+        .unwrap();
+        let hit = search_item_to_hit(&item).expect("un video debe mapear a hit");
+        assert_eq!(hit.video_id, "v1");
+        assert_eq!(hit.channel_id, "UCotro");
+        assert_eq!(hit.title, "Competencia");
+    }
+
+    #[test]
+    fn search_item_no_video_se_descarta() {
+        // Resultado de canal: id sin videoId -> None (se filtra).
+        let item: SearchItem = serde_json::from_str(
+            r#"{
+              "id": { "channelId": "UCx" },
+              "snippet": { "channelId": "UCx", "title": "Un canal",
+                "publishedAt": "2021-09-27T03:00:00Z" }
+            }"#,
+        )
+        .unwrap();
+        assert!(search_item_to_hit(&item).is_none());
     }
 }
 
@@ -737,15 +1051,13 @@ mod real_api_tests {
         let key = match api_key_from_env() {
             Some(k) => k,
             None => {
-                eprintln!(
-                    "SALTADO: no se encontró YOUTUBE_KEY_API (ni en el entorno ni en .env)"
-                );
+                eprintln!("SALTADO: no se encontró YOUTUBE_KEY_API (ni en el entorno ni en .env)");
                 return;
             }
         };
 
-        let client = YoutubeClient::new(SecretString::from(key))
-            .expect("debe construir el cliente HTTP");
+        let client =
+            YoutubeClient::new(SecretString::from(key)).expect("debe construir el cliente HTTP");
 
         // Video público estable; tope chico para gastar mínima cuota.
         let limits = IngestLimits {
@@ -764,14 +1076,16 @@ mod real_api_tests {
                 }
                 if let Some(c) = ingested.comments.first() {
                     // Snippet de metadata (sin datos sensibles): video_id + autor.
-                    println!("  primer comentario -> video_id={}, autor={}",
+                    println!(
+                        "  primer comentario -> video_id={}, autor={}",
                         c.video_id,
                         ingested
                             .commenters
                             .iter()
                             .find(|m| m.channel_id == c.author_channel_id)
                             .map(|m| m.display_name.as_str())
-                            .unwrap_or("?"));
+                            .unwrap_or("?")
+                    );
                 }
                 assert!(
                     !ingested.comments.is_empty(),
@@ -781,8 +1095,11 @@ mod real_api_tests {
             Err(e) => {
                 // Reporta el error EXACTO de la API (clasificado).
                 eprintln!("FETCH FALLÓ: {e}");
-                eprintln!("  quota_exceeded={} comments_disabled={}",
-                    e.is_quota_exceeded(), e.is_comments_disabled());
+                eprintln!(
+                    "  quota_exceeded={} comments_disabled={}",
+                    e.is_quota_exceeded(),
+                    e.is_comments_disabled()
+                );
                 panic!("fetch real falló: {e}");
             }
         }
@@ -884,6 +1201,215 @@ mod http_tests {
                 }
             }
         }
+
+        // Replica fiel de fetch_video_meta pero contra self.base (test): verifica
+        // el chunking de 50 ids/request sin tocar la red real.
+        async fn fetch_video_meta(&self, ids: &[String]) -> Result<Vec<VideoMeta>, YoutubeError> {
+            let mut out = Vec::with_capacity(ids.len());
+            for chunk in ids.chunks(50) {
+                let joined = chunk.join(",");
+                let url = format!(
+                    "{}/videos?key=k&id={}&part=snippet,statistics",
+                    self.base, joined
+                );
+                let resp = self.inner.http.get(&url).send().await?;
+                let status = resp.status();
+                let body = resp.bytes().await?;
+                if !status.is_success() {
+                    return Err(parse_api_error(status.as_u16(), &body));
+                }
+                let list: VideoListResponse = serde_json::from_slice(&body)
+                    .map_err(|e| YoutubeError::Shape(e.to_string()))?;
+                out.extend(list.items.iter().map(video_item_to_meta));
+            }
+            Ok(out)
+        }
+
+        // Replica fiel de search pero contra self.base (test): ejercita la
+        // paginación, el tope max_pages y la resiliencia a cuota.
+        async fn search(&self, plan: &SearchPlan) -> Result<SearchResults, YoutubeError> {
+            let mut hits = Vec::new();
+            let mut page_token = String::new();
+            let mut pages = 0u32;
+            while pages < plan.max_pages {
+                let url = format!("{}/search?key=k&pageToken={}", self.base, page_token);
+                let resp = self.inner.http.get(&url).send().await?;
+                let status = resp.status();
+                let body = resp.bytes().await?;
+                if !status.is_success() {
+                    let err = parse_api_error(status.as_u16(), &body);
+                    if err.is_quota_exceeded() {
+                        return Ok(SearchResults {
+                            hits,
+                            incomplete: true,
+                            incomplete_reason: Some(err.to_string()),
+                        });
+                    }
+                    return Err(err);
+                }
+                let list: SearchListResponse = serde_json::from_slice(&body)
+                    .map_err(|e| YoutubeError::Shape(e.to_string()))?;
+                pages += 1;
+                hits.extend(list.items.iter().filter_map(search_item_to_hit));
+                match list.next_page_token {
+                    Some(t) if pages < plan.max_pages => page_token = t,
+                    _ => break,
+                }
+            }
+            Ok(SearchResults {
+                hits,
+                incomplete: false,
+                incomplete_reason: None,
+            })
+        }
+    }
+
+    /// Una página de `search.list` con `n` videos y, opcional, `nextPageToken`.
+    fn search_page(start: usize, n: usize, next: Option<&str>) -> serde_json::Value {
+        let items: Vec<_> = (start..start + n)
+            .map(|i| {
+                serde_json::json!({
+                    "id": { "videoId": format!("v{i}") },
+                    "snippet": {
+                        "channelId": "UCotro",
+                        "title": format!("hit{i}"),
+                        "publishedAt": "2021-09-27T03:00:00Z"
+                    }
+                })
+            })
+            .collect();
+        let mut obj = serde_json::json!({ "items": items });
+        if let Some(t) = next {
+            obj["nextPageToken"] = serde_json::json!(t);
+        }
+        obj
+    }
+
+    #[tokio::test]
+    async fn search_pagina_hasta_max_pages() {
+        let server = MockServer::start().await;
+        Mock::given(path("/search"))
+            .and(query_param("pageToken", ""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_page(0, 2, Some("P2"))))
+            .mount(&server)
+            .await;
+        Mock::given(path("/search"))
+            .and(query_param("pageToken", "P2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_page(2, 2, None)))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let plan = SearchPlan {
+            query: "x".into(),
+            trending: false,
+            max_pages: 2,
+        };
+        let res = c.search(&plan).await.unwrap();
+        assert_eq!(res.hits.len(), 4, "dos páginas de 2 hits");
+        assert!(!res.incomplete);
+    }
+
+    #[tokio::test]
+    async fn search_respeta_el_tope_de_paginas() {
+        let server = MockServer::start().await;
+        // Siempre hay nextPageToken: sin tope pediría páginas infinitas.
+        Mock::given(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_page(0, 2, Some("LOOP"))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let plan = SearchPlan {
+            query: "x".into(),
+            trending: false,
+            max_pages: 1,
+        };
+        let res = c.search(&plan).await.unwrap();
+        assert_eq!(res.hits.len(), 2, "una sola página por el tope");
+        assert!(!res.incomplete);
+    }
+
+    #[tokio::test]
+    async fn search_quota_exceeded_devuelve_parcial() {
+        let server = MockServer::start().await;
+        // Página 1 ok (token), página 2 -> quotaExceeded.
+        Mock::given(path("/search"))
+            .and(query_param("pageToken", ""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_page(0, 2, Some("P2"))))
+            .mount(&server)
+            .await;
+        Mock::given(path("/search"))
+            .and(query_param("pageToken", "P2"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "code": 403, "message": "quota",
+                    "errors": [{ "reason": "quotaExceeded" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let plan = SearchPlan {
+            query: "x".into(),
+            trending: false,
+            max_pages: 5,
+        };
+        let res = c.search(&plan).await.unwrap();
+        assert_eq!(res.hits.len(), 2, "conserva la página ya paga");
+        assert!(res.incomplete, "debe marcar incompleto por cuota");
+        assert!(res.incomplete_reason.is_some());
+    }
+
+    /// Una respuesta de `videos.list` con un único item de id `vid`.
+    fn video_meta_page(vid: &str) -> serde_json::Value {
+        serde_json::json!({
+            "items": [{
+                "id": vid,
+                "snippet": {
+                    "channelId": "UCcanal",
+                    "title": "t",
+                    "tags": [],
+                    "publishedAt": "2021-09-27T03:00:00Z"
+                },
+                "statistics": { "viewCount": "10", "likeCount": "1", "commentCount": "0" }
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn fetch_video_meta_chunkea_de_a_50() {
+        let server = MockServer::start().await;
+        // 51 ids -> 2 requests (50 + 1). Cada request devuelve 1 item.
+        Mock::given(path("/videos"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(video_meta_page("v")))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let ids: Vec<String> = (0..51).map(|i| format!("id{i}")).collect();
+        let metas = c.fetch_video_meta(&ids).await.unwrap();
+        // 1 item por request x 2 requests.
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].view_count, Some(10));
+        // El server verifica en drop que se llamó exactamente 2 veces (chunking).
+    }
+
+    #[tokio::test]
+    async fn fetch_video_meta_quota_exceeded_se_propaga() {
+        let server = MockServer::start().await;
+        Mock::given(path("/videos"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": { "code": 403, "message": "quota",
+                    "errors": [{ "reason": "quotaExceeded" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for(&server.uri());
+        let err = c.fetch_video_meta(&["id0".to_string()]).await.unwrap_err();
+        assert!(err.is_quota_exceeded());
     }
 
     #[tokio::test]
