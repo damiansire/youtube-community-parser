@@ -75,26 +75,45 @@ fn sort_most_active_first(stats: &mut [CommenterStats]) {
     });
 }
 
+/// Los `n` que **más** comentan, derivados de un ranking **ya calculado**.
+///
+/// Es la cabeza del ranking (que ya viene de más a menos activo). No recalcula
+/// nada: trabajá un único `rank_commenters` y derivá ambos extremos con esto y
+/// con [`least_active_of`] (ver F5 — evitar el "ranking x3").
+pub fn most_active_of(ranking: &[CommenterStats], n: usize) -> Vec<CommenterStats> {
+    ranking[..n.min(ranking.len())].to_vec()
+}
+
+/// Los `n` que **menos** comentan, derivados de un ranking **ya calculado**
+/// (la cola del mismo orden).
+pub fn least_active_of(ranking: &[CommenterStats], n: usize) -> Vec<CommenterStats> {
+    let start = ranking.len().saturating_sub(n);
+    ranking[start..].to_vec()
+}
+
 /// Los `n` que **más** comentan.
+///
+/// Conveniencia que calcula el ranking y toma la cabeza. Si necesitás los dos
+/// extremos a la vez, calculá `rank_commenters` una sola vez y usá
+/// [`most_active_of`] / [`least_active_of`] para no recalcular (F5).
 pub fn most_active(
     comments: &[Comment],
     commenters: &[Commenter],
     n: usize,
 ) -> Vec<CommenterStats> {
-    let mut ranked = rank_commenters(comments, commenters);
-    ranked.truncate(n);
-    ranked
+    most_active_of(&rank_commenters(comments, commenters), n)
 }
 
 /// Los `n` que **menos** comentan (el extremo inferior del mismo ranking).
+///
+/// Ver la nota de [`most_active`] sobre evitar el recálculo cuando se necesitan
+/// ambos extremos.
 pub fn least_active(
     comments: &[Comment],
     commenters: &[Commenter],
     n: usize,
 ) -> Vec<CommenterStats> {
-    let ranked = rank_commenters(comments, commenters);
-    let start = ranked.len().saturating_sub(n);
-    ranked[start..].to_vec()
+    least_active_of(&rank_commenters(comments, commenters), n)
 }
 
 #[cfg(test)]
@@ -204,5 +223,34 @@ mod tests {
         assert!(rank_commenters(&[], &[]).is_empty());
         assert!(most_active(&[], &[], 5).is_empty());
         assert!(least_active(&[], &[], 5).is_empty());
+    }
+
+    #[test]
+    fn extremos_derivados_coinciden_con_recalcular() {
+        // F5: derivar de un único ranking debe dar lo mismo que recalcular.
+        let (comments, commenters) = sample();
+        let ranking = rank_commenters(&comments, &commenters);
+
+        assert_eq!(
+            most_active_of(&ranking, 2),
+            most_active(&comments, &commenters, 2)
+        );
+        assert_eq!(
+            least_active_of(&ranking, 2),
+            least_active(&comments, &commenters, 2)
+        );
+    }
+
+    #[test]
+    fn extremos_derivados_con_n_mayor_al_total_no_paniquean() {
+        // n más grande que el ranking: devuelve todo, sin desbordar el slice.
+        let (comments, commenters) = sample();
+        let ranking = rank_commenters(&comments, &commenters);
+        assert_eq!(ranking.len(), 3);
+
+        assert_eq!(most_active_of(&ranking, 99).len(), 3);
+        assert_eq!(least_active_of(&ranking, 99).len(), 3);
+        assert_eq!(most_active_of(&[], 5).len(), 0);
+        assert_eq!(least_active_of(&[], 5).len(), 0);
     }
 }

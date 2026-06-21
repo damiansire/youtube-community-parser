@@ -7,4 +7,6 @@ pub mod models;
 pub mod ranking;
 
 pub use models::{ChannelId, Comment, Commenter};
-pub use ranking::{least_active, most_active, rank_commenters, CommenterStats};
+pub use ranking::{
+    least_active, least_active_of, most_active, most_active_of, rank_commenters, CommenterStats,
+};

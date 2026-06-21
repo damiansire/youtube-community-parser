@@ -4,7 +4,9 @@
 
 mod ingest;
 
-use sdp_core::{least_active, most_active, rank_commenters, Comment, Commenter, CommenterStats};
+use sdp_core::{
+    least_active_of, most_active_of, rank_commenters, Comment, Commenter, CommenterStats,
+};
 use serde::Serialize;
 
 /// Respuesta de un análisis: ranking completo + los extremos ya recortados,
@@ -20,14 +22,17 @@ pub struct Analysis {
 
 impl Analysis {
     fn build(comments: &[Comment], commenters: &[Commenter], extremes: usize) -> Self {
-        let top = most_active(comments, commenters, extremes);
-        // `least_active` devuelve la cola del mismo ranking, que se solapa con
-        // `top` cuando hay <= 2*extremes comentaristas (la misma persona saldría
-        // como "de las que más" y "de las que menos" a la vez). Excluimos del
-        // tramo inferior a quienes ya están en el tope.
+        // F5: calculamos el ranking UNA vez y derivamos ambos extremos de él, en
+        // lugar de recalcularlo por cada extremo.
+        let ranking = rank_commenters(comments, commenters);
+        let top = most_active_of(&ranking, extremes);
+        // El tramo inferior (cola del mismo ranking) se solapa con `top` cuando
+        // hay <= 2*extremes comentaristas (la misma persona saldría como "de las
+        // que más" y "de las que menos" a la vez). Excluimos del tramo inferior a
+        // quienes ya están en el tope.
         let top_ids: std::collections::HashSet<&str> =
             top.iter().map(|s| s.channel_id.as_str()).collect();
-        let bottom = least_active(comments, commenters, extremes)
+        let bottom = least_active_of(&ranking, extremes)
             .into_iter()
             .filter(|s| !top_ids.contains(s.channel_id.as_str()))
             .collect();
@@ -35,7 +40,7 @@ impl Analysis {
         Analysis {
             total_comments: comments.len(),
             total_commenters: commenters.len(),
-            ranking: rank_commenters(comments, commenters),
+            ranking,
             top,
             bottom,
         }
