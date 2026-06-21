@@ -449,8 +449,12 @@ async fn refine_ideas_ai(
     let prompt = sdp_core::build_ideas_prompt(&ideas);
     // Tope de salida derivado del presupuesto: lo ejecutado == lo estimado.
     let max_tokens = sdp_core::max_output_tokens_for(ideas.len()).min(u32::MAX as u64) as u32;
-    let client =
-        sdp_llm::build_provider(provider, SecretString::from(api_key), None, Some(max_tokens))?;
+    let client = sdp_llm::build_provider(
+        provider,
+        SecretString::from(api_key),
+        None,
+        Some(max_tokens),
+    )?;
     let raw = client.enhance(&prompt).await?;
     sdp_core::parse_ideas_response(&raw).map_err(CommandError::from)
 }
@@ -469,10 +473,7 @@ async fn audit_seo(app: tauri::AppHandle, input: SeoInput) -> Result<SeoReport, 
 /// calcula (`ceil(n/50)` unidades). Emite un token de confirmación ligado al
 /// conjunto de ids (auditoría P1).
 #[tauri::command]
-fn estimate_video_meta(
-    ids: Vec<String>,
-    confirm: State<'_, ConfirmStore>,
-) -> ConfirmableEstimate {
+fn estimate_video_meta(ids: Vec<String>, confirm: State<'_, ConfirmStore>) -> ConfirmableEstimate {
     let estimate = sdp_core::cost::estimate_video_meta(ids.len());
     let corpus_hash = confirm::hash_texts(&ids);
     confirmable(&confirm, "fetch_video_meta", estimate, corpus_hash)
@@ -681,7 +682,10 @@ mod tests {
         let free = sdp_core::cost::estimate_search(0);
         assert!(!free.requires_confirmation);
         let r = ensure_confirmed_token(&store, "run_search", &free, 0, None);
-        assert!(r.is_ok(), "una operación gratis no debe exigir confirmación");
+        assert!(
+            r.is_ok(),
+            "una operación gratis no debe exigir confirmación"
+        );
     }
 
     #[test]

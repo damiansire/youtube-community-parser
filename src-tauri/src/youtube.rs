@@ -1538,10 +1538,10 @@ mod http_tests {
             .await;
         // La playlist tiene 3 videos pero max_videos=1 corta en el primero.
         Mock::given(path("/playlistItems"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(playlist_page(
-                &["vidA", "vidB", "vidC"],
-                Some("PP2"),
-            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(playlist_page(&["vidA", "vidB", "vidC"], Some("PP2"))),
+            )
             .mount(&server)
             .await;
         Mock::given(path("/commentThreads"))
@@ -1558,10 +1558,7 @@ mod http_tests {
         let data = c.ingest_channel_with("UCx", limits).await.unwrap();
         assert_eq!(data.comments.len(), 1, "solo el primer video");
         assert!(data.incomplete, "truncar por max_videos marca incompleto");
-        assert!(data
-            .incomplete_reason
-            .unwrap()
-            .contains("videos por canal"));
+        assert!(data.incomplete_reason.unwrap().contains("videos por canal"));
     }
 
     #[tokio::test]
