@@ -154,11 +154,19 @@ body {
 .roster-row__count small { font-weight: 500; color: var(--muted); font-size: 11px; margin-left: 3px; }
 
 /* ---------- table ---------- */
+/* El "Padrón completo" puede traer miles de filas: el cuerpo scrollea dentro de
+   una ventana fija y main.js virtualiza (auditoría P8: renderiza solo las filas
+   visibles, no un <tr> por cada persona del histórico). El thead queda sticky. */
+.table-scroll { max-height: 420px; overflow-y: auto; }
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.table thead th { position: sticky; top: 0; z-index: 1; background: var(--bg, #fff); }
 .table th {
   text-align: left; font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
   color: var(--muted); font-weight: 600; padding: 8px 12px; border-bottom: 1px solid var(--line);
 }
+/* Filas espaciadoras de la virtualización: ocupan el alto de las filas fuera de
+   la ventana visible para preservar la barra de scroll, sin pintar nada. */
+.table tr.vrow-spacer td { padding: 0; border: 0; }
 .table td { padding: 11px 12px; border-bottom: 1px solid var(--line); }
 .table tr:last-child td { border-bottom: 0; }
 .table .num { text-align: right; font-variant-numeric: tabular-nums; }

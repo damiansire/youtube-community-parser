@@ -21,6 +21,7 @@ const els = {
   top: $("top"),
   bottom: $("bottom"),
   rows: $("rows"),
+  tableScroll: $("table-scroll"),
 };
 
 function setStatus(msg, kind) {
@@ -108,28 +109,114 @@ function renderRosters(top, bottom) {
   bottom.forEach((s, i) => els.bottom.appendChild(rosterRow(s, "·", false)));
 }
 
-function renderTable(ranking) {
-  els.rows.innerHTML = "";
-  ranking.forEach((s, i) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td class="num">${i + 1}</td>
-      <td>${escapeHtml(displayName(s))}</td>
-      <td class="num">${s.comment_count}</td>
-      <td class="num">${s.total_likes}</td>
-      <td>${fmtDate(s.last_seen)}</td>`;
-    els.rows.appendChild(tr);
-  });
+// ---------- Padrón completo: tabla virtualizada (auditoría P8) ----------
+//
+// El ranking llega COMPLETO por IPC y puede tener miles de filas (el histórico
+// crece sin techo). Antes se creaba un <tr> por persona, inyectando miles de
+// nodos al DOM justo cuando hay más histórico. Acá renderizamos SOLO la ventana
+// visible + un buffer, con dos filas espaciadoras (arriba/abajo) que ocupan el
+// alto de lo que no se pinta para preservar la barra de scroll.
+
+const vtable = {
+  data: [], // ranking completo
+  rowH: 0, // alto medido de una fila real (px)
+  buffer: 8, // filas extra arriba/abajo para que el scroll no muestre huecos
+};
+
+// Construye el <tr> de la persona en la posición `i` del ranking (0-based).
+function tableRow(s, i) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td class="num">${i + 1}</td>
+    <td>${escapeHtml(displayName(s))}</td>
+    <td class="num">${s.comment_count}</td>
+    <td class="num">${s.total_likes}</td>
+    <td>${fmtDate(s.last_seen)}</td>`;
+  return tr;
 }
+
+// Fila espaciadora invisible que ocupa `h` px (para empujar el contenido visible
+// y mantener la altura total del scroll sin pintar miles de filas).
+function spacerRow(h) {
+  const tr = document.createElement("tr");
+  tr.className = "vrow-spacer";
+  tr.setAttribute("aria-hidden", "true");
+  tr.innerHTML = `<td colspan="5" style="height:${Math.max(0, h)}px"></td>`;
+  return tr;
+}
+
+// Pinta la ventana de filas visible según el scroll actual.
+function paintWindow() {
+  const data = vtable.data;
+  const total = data.length;
+  if (!vtable.rowH || total === 0) return;
+
+  const viewport = els.tableScroll.clientHeight || 420;
+  const scrollTop = els.tableScroll.scrollTop;
+  const perView = Math.ceil(viewport / vtable.rowH);
+
+  let start = Math.floor(scrollTop / vtable.rowH) - vtable.buffer;
+  start = Math.max(0, start);
+  let end = start + perView + vtable.buffer * 2;
+  end = Math.min(total, end);
+
+  const frag = document.createDocumentFragment();
+  frag.appendChild(spacerRow(start * vtable.rowH));
+  for (let i = start; i < end; i++) frag.appendChild(tableRow(data[i], i));
+  frag.appendChild(spacerRow((total - end) * vtable.rowH));
+
+  els.rows.replaceChildren(frag);
+}
+
+function renderTable(ranking) {
+  vtable.data = ranking || [];
+  els.tableScroll.scrollTop = 0;
+
+  if (vtable.data.length === 0) {
+    els.rows.replaceChildren();
+    return;
+  }
+
+  // Medimos el alto real de una fila renderizándola una vez (robusto ante cambios
+  // de fuente/padding en CSS, sin hardcodear el alto).
+  if (!vtable.rowH) {
+    const probe = tableRow(vtable.data[0], 0);
+    els.rows.replaceChildren(probe);
+    vtable.rowH = probe.getBoundingClientRect().height || 45;
+  }
+
+  paintWindow();
+}
+
+// El listener de scroll se registra UNA vez (el contenedor es persistente entre
+// análisis): así no acumulamos handlers por cada render (mismo cuidado que P17).
+let vtableScrollWired = false;
+function wireVirtualTable() {
+  if (vtableScrollWired || !els.tableScroll) return;
+  let ticking = false;
+  els.tableScroll.addEventListener("scroll", () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      paintWindow();
+    });
+  });
+  vtableScrollWired = true;
+}
+wireVirtualTable();
 
 function render(analysis) {
   els.statComments.textContent = analysis.total_comments;
   els.statPeople.textContent = analysis.total_commenters;
+  // Mostramos los resultados ANTES de virtualizar la tabla: la virtualización
+  // mide el alto real de una fila y el viewport, que valen 0 si el contenedor
+  // sigue oculto (auditoría P8).
+  els.empty.hidden = true;
+  els.results.hidden = false;
   renderSpectrum(analysis.ranking);
   renderRosters(analysis.top, analysis.bottom);
   renderTable(analysis.ranking);
-  els.empty.hidden = true;
-  els.results.hidden = false;
 }
 
 async function analyzeReal() {
