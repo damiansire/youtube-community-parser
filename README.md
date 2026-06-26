@@ -1,102 +1,103 @@
-# Subscriptor Data Parser
+# Subscriber Data Parser
 
-App de escritorio para **conocer a tu comunidad de YouTube**: a partir de los
-comentarios de un canal o un video, muestra quiénes son los que **más** comentan,
-los que **menos**, y la forma completa de tu comunidad.
+A desktop app to **get to know your YouTube community**: from the comments of a
+channel or a video, it shows who comments the **most**, who comments the
+**least**, and the overall shape of your community.
 
-La idea es ayudar a que las comunidades sean más fuertes y se conozcan mejor entre
-sí. Usalo de forma ética y por el bien común.
+The goal is to help communities become stronger and get to know each other
+better. Use it ethically and for the common good.
 
-## Arquitectura
+## Architecture
 
 ```
-canal / video
+channel / video
    │
    ▼
-[ src-tauri/youtube.rs ]  cliente nativo (reqwest, async): pega directo a la
-   │                       YouTube Data API v3 (commentThreads/playlistItems) → tipos del core
+[ src-tauri/youtube.rs ]  native client (reqwest, async): hits the
+   │                       YouTube Data API v3 (commentThreads/playlistItems) → core types
    ▼
-[ sdp-core ]    dominio puro en Rust: modelos + rankings (testeable, sin UI)
+[ sdp-core ]    pure Rust domain: models + rankings (testable, UI-free)
    │
    ▼
-[ src-tauri ]   app de escritorio Tauri v2: comandos #[tauri::command]
+[ src-tauri ]   Tauri v2 desktop app: #[tauri::command] commands
    │
    ▼
-[ app ]         UI del webview (HTML/CSS/JS): espectro + padrón de comentaristas
+[ app ]         webview UI (HTML/CSS/JS): spectrum + commenter roster
 ```
 
-La ingesta es **nativa en Rust** (no hay sidecar Node): un cliente `reqwest`
-async que pega directo a la [YouTube Data API v3](https://developers.google.com/youtube/v3).
-Esto hace la app **distribuible** (no requiere `node` ni el árbol de fuentes en
-la máquina del usuario final).
+Ingestion is **native in Rust** (there is no Node sidecar): an async `reqwest`
+client that hits the [YouTube Data API v3](https://developers.google.com/youtube/v3)
+directly. This makes the app **distributable** (it doesn't require `node` or the
+source tree on the end user's machine).
 
-| Carpeta      | Qué es                                                                 |
-|--------------|------------------------------------------------------------------------|
-| `crates/core`| Dominio: `Commenter`, `Comment` y los rankings. Sin red ni UI.         |
-| `crates/storage` | Persistencia local SQLite del histórico. Cada análisis se guarda (upsert idempotente) y `analyze_history` lo reanaliza sin volver a gastar cuota. |
-| `src-tauri`  | Backend Tauri v2 + cliente nativo de YouTube (`youtube.rs`).          |
-| `app`        | Frontend del webview.                                                  |
-| `legacy`     | Script Node original (2021), preservado por historia.                  |
+| Folder           | What it is                                                            |
+|------------------|----------------------------------------------------------------------|
+| `crates/core`    | Domain: `Commenter`, `Comment` and the rankings. No network, no UI.  |
+| `crates/storage` | Local SQLite persistence of the history. Each analysis is saved (idempotent upsert) and `analyze_history` re-analyzes it without spending quota again. |
+| `src-tauri`      | Tauri v2 backend + native YouTube client (`youtube.rs`).             |
+| `app`            | Webview frontend.                                                    |
+| `legacy`         | Original Node script (2021), kept for history.                       |
 
-## Modelo de amenaza de la API key
+## API key threat model
 
-La key de la YouTube Data API v3 se ingresa en la UI y se usa para autenticar las
-llamadas. Decisiones y alcance:
+The YouTube Data API v3 key is entered in the UI and used to authenticate the
+calls. Decisions and scope:
 
-- **Qué protege.** La key viaja por IPC al proceso nativo y, en cuanto cruza ese
-  límite, se envuelve en [`secrecy::SecretString`](https://docs.rs/secrecy):
-  no se loguea, no se imprime por `Debug` y se **zeroiza** al dropearse, así que
-  no queda en claro en memoria del proceso más tiempo del necesario. Se expone
-  el valor solo el instante justo para encodearla en la URL del request.
-- **Qué NO protege (y por qué es aceptable acá).** Es una app de **escritorio
-  mono-usuario**: la key **no se persiste** (no se guarda en disco ni en
-  keychain), se pide en cada sesión. No se defiende contra otro proceso del mismo
-  usuario inspeccionando la memoria del proceso (un atacante con ese nivel de
-  acceso ya controla la sesión). Un keychain del SO completo
-  (Stronghold/keyring) sería **desproporcionado** para el caso de uso y agrega
-  superficie de dependencias; queda como mejora opcional si más adelante se
-  decide persistir la key entre sesiones.
-- **Higiene básica.** La key va por la URL del request HTTPS (TLS la cifra en
-  tránsito) y nunca por argv ni por el entorno de un subproceso (ya no hay
-  subproceso). No se reintroduce el viejo riesgo del sidecar Node, donde la key
-  cruzaba al `env` de otro proceso.
+- **What it protects.** The key travels over IPC to the native process and, as
+  soon as it crosses that boundary, it is wrapped in
+  [`secrecy::SecretString`](https://docs.rs/secrecy): it is not logged, not
+  printed via `Debug`, and is **zeroized** on drop, so it doesn't stay in the
+  clear in process memory longer than necessary. The value is exposed only for
+  the exact instant needed to encode it into the request URL.
+- **What it does NOT protect (and why that's acceptable here).** This is a
+  **single-user desktop app**: the key is **not persisted** (not saved to disk
+  or to a keychain), it is requested every session. It doesn't defend against
+  another process of the same user inspecting the process memory (an attacker
+  with that level of access already controls the session). A full OS keychain
+  (Stronghold/keyring) would be **disproportionate** for the use case and adds
+  dependency surface; it stays as an optional improvement if persisting the key
+  across sessions is decided later.
+- **Basic hygiene.** The key goes over the HTTPS request URL (TLS encrypts it in
+  transit) and never through argv or a subprocess environment (there is no
+  subprocess anymore). It doesn't reintroduce the old Node-sidecar risk, where
+  the key crossed into another process's `env`.
 
-## Requisitos
+## Requirements
 
-- **Rust + Cargo** con el toolchain **MSVC** (`stable-x86_64-pc-windows-msvc`).
-  El toolchain `windows-gnu` **no** sirve para Tauri en Windows.
-- **Visual Studio C++ Build Tools** (workload "Desktop development with C++"):
-  aporta el linker `link.exe` y el Windows SDK que Tauri/WebView2 necesitan.
-  Sin esto, la app de escritorio no linkea.
-- **WebView2 Runtime** (viene de fábrica en Windows 11).
-- **API key de YouTube Data API v3**
-  ([cómo obtenerla](https://developers.google.com/youtube/v3/getting-started)).
+- **Rust + Cargo** with the **MSVC** toolchain (`stable-x86_64-pc-windows-msvc`).
+  The `windows-gnu` toolchain does **not** work for Tauri on Windows.
+- **Visual Studio C++ Build Tools** (the "Desktop development with C++"
+  workload): it provides the `link.exe` linker and the Windows SDK that
+  Tauri/WebView2 need. Without it, the desktop app won't link.
+- **WebView2 Runtime** (ships by default on Windows 11).
+- **YouTube Data API v3 key**
+  ([how to get one](https://developers.google.com/youtube/v3/getting-started)).
 
-> En Windows, una vez instaladas las Build Tools, fijá el toolchain MSVC para
-> este repo: `rustup override set stable-x86_64-pc-windows-msvc`.
+> On Windows, once the Build Tools are installed, pin the MSVC toolchain for
+> this repo: `rustup override set stable-x86_64-pc-windows-msvc`.
 
-## Desarrollo
+## Development
 
 ```bash
-# Tests del dominio (Rust puro, funciona con cualquier toolchain)
+# Domain tests (pure Rust, works with any toolchain)
 cargo test -p sdp-core
 
-# Tests del cliente nativo de YouTube + persistencia (requiere MSVC para linkear)
+# Native YouTube client + persistence tests (requires MSVC to link)
 cargo test -p sdp-desktop -p sdp-storage
 
-# Levantar la app de escritorio (requiere MSVC + Build Tools + @tauri-apps/cli)
+# Launch the desktop app (requires MSVC + Build Tools + @tauri-apps/cli)
 cargo tauri dev
 ```
 
-La app abre con un botón **"Ver con datos de ejemplo"** para explorar la interfaz
-sin API key. Para datos reales, pegá el ID del canal o video y tu API key.
+The app opens with a **"View with sample data"** button to explore the interface
+without an API key. For real data, paste the channel or video ID and your API key.
 
-## Estado
+## Status
 
-Reconversión en curso del parser original (Node, 2021) a un sistema de trackeo en
-Rust. Hecho: dominio con tests, **ingesta nativa en Rust** (reqwest, sin sidecar
-Node — la app es distribuible), **persistencia local (SQLite) cableada** a los
-comandos (cada análisis se guarda y `analyze_history` reanaliza sin gastar
-cuota), **topes de cuota configurables** con resultados parciales (F4), scaffold
-de la app y UI. Pendiente: empaquetar/instalar la app de escritorio (requiere las
-Build Tools de arriba) y, opcionalmente, un botón de "ver histórico" en la UI.
+In-progress conversion of the original parser (Node, 2021) into a tracking system
+in Rust. Done: tested domain, **native ingestion in Rust** (reqwest, no Node
+sidecar — the app is distributable), **local persistence (SQLite) wired** to the
+commands (each analysis is saved and `analyze_history` re-analyzes without
+spending quota), **configurable quota caps** with partial results (F4), app
+scaffold and UI. Pending: packaging/installing the desktop app (requires the
+Build Tools above) and, optionally, a "view history" button in the UI.
