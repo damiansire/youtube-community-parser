@@ -36,7 +36,6 @@ source tree on the end user's machine).
 | `crates/storage` | Local SQLite persistence of the history. Each analysis is saved (idempotent upsert) and `analyze_history` re-analyzes it without spending quota again. |
 | `src-tauri`      | Tauri v2 backend + native YouTube client (`youtube.rs`).             |
 | `app`            | Webview frontend.                                                    |
-| `legacy`         | Original Node script (2021), kept for history.                       |
 
 ## API key threat model
 

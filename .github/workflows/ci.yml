@@ -41,15 +41,3 @@ jobs:
 
       - name: Build (incluye src-tauri)
         run: cargo build --workspace
-
-  npm-audit:
-    name: npm audit (legacy)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Auditar dependencias de producción del paquete legacy
-        working-directory: legacy
-        run: npm audit --omit=dev
