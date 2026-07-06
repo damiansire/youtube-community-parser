@@ -192,6 +192,22 @@ impl Store {
         Ok(out)
     }
 
+    /// Solo el **texto** de cada comentario guardado.
+    ///
+    /// Las rutas que hacen minería de texto (temas/SEO) descartan todas las
+    /// demás columnas: pedir el `Comment` completo con [`all_comments`] materializa
+    /// —y clona— id/video/autor/like/fecha (y parsea el RFC3339) para tirarlos
+    /// enseguida. Sobre un histórico grande, eso es I/O y allocs O(N) muertos en un
+    /// hot path (auditoría rust/core.md: evitar clones de colecciones enteras).
+    /// Acá sacamos una sola columna y devolvemos `Vec<String>` directo.
+    ///
+    /// [`all_comments`]: Store::all_comments
+    pub fn all_comment_texts(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT text FROM comment")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Inserta o actualiza metadata de videos (F9, idempotente por `video_id`).
     /// Los `tags` se guardan como JSON en una columna TEXT; las cuentas pueden
     /// ser `NULL` (estadísticas ocultas).

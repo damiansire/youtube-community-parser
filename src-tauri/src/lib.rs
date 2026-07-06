@@ -375,8 +375,8 @@ async fn persist_video_meta(
 /// de la comunidad (F6). Costo 0: trabaja sobre lo ya persistido, sin red.
 #[tauri::command]
 async fn analyze_corpus(app: tauri::AppHandle) -> Result<CorpusInsights, CommandError> {
-    let comments = read_comments(&app).await?;
-    let texts: Vec<String> = comments.into_iter().map(|c| c.text).collect();
+    // Solo texto: no materializamos el `Comment` completo para tirarlo (P-perf).
+    let texts = with_store(&app, |store| store.all_comment_texts()).await?;
     Ok(sdp_core::corpus_insights(&texts))
 }
 
@@ -469,8 +469,8 @@ async fn refine_ideas_ai(
 /// demanda la comunidad (del histórico local). Costo 0, sin red.
 #[tauri::command]
 async fn audit_seo(app: tauri::AppHandle, input: SeoInput) -> Result<SeoReport, CommandError> {
-    let comments = read_comments(&app).await?;
-    let texts: Vec<String> = comments.into_iter().map(|c| c.text).collect();
+    // Solo texto: mismo hot path que analyze_corpus (P-perf).
+    let texts = with_store(&app, |store| store.all_comment_texts()).await?;
     let corpus = sdp_core::corpus_insights(&texts);
     Ok(sdp_core::audit_seo(&input, &corpus))
 }
@@ -766,5 +766,111 @@ mod tests {
         }];
         // "b" volvió; faltan "a" (deduplicado) y "c", en orden de aparición.
         assert_eq!(missing_video_ids(&requested, &returned), vec!["a", "c"]);
+    }
+
+    // ---- Fingerprints del gate anti-TOCTOU (auditoría: cobertura cero) ----
+    // El token de confirmación se liga a `hash_texts(fingerprint(insumo))`. Si el
+    // fingerprint no cambia cuando cambia el insumo, el gate confirma un monto y
+    // ejecuta otro sin detectarlo. Estos tests fijan estabilidad (mismo insumo =>
+    // misma huella) y sensibilidad (cada campo relevante mueve la huella).
+
+    fn idea(title_seed: &str, signal: sdp_core::DemandSignal, n_support: usize) -> VideoIdea {
+        VideoIdea {
+            title_seed: title_seed.into(),
+            signal,
+            supporting_comment_ids: (0..n_support).map(|i| format!("c{i}")).collect(),
+            score: 0,
+            sample_quotes: vec![],
+        }
+    }
+
+    #[test]
+    fn search_fingerprint_estable_para_el_mismo_plan() {
+        let a = SearchPlan {
+            query: "rust async".into(),
+            trending: false,
+            max_pages: 3,
+        };
+        let b = SearchPlan {
+            query: "rust async".into(),
+            trending: false,
+            max_pages: 3,
+        };
+        assert_eq!(search_fingerprint(&a), search_fingerprint(&b));
+    }
+
+    #[test]
+    fn search_fingerprint_sensible_a_query_trending_y_paginas() {
+        let base = SearchPlan {
+            query: "a".into(),
+            trending: false,
+            max_pages: 1,
+        };
+        let fp = search_fingerprint(&base);
+        let otra_query = SearchPlan {
+            query: "b".into(),
+            trending: false,
+            max_pages: 1,
+        };
+        let otro_modo = SearchPlan {
+            query: "a".into(),
+            trending: true,
+            max_pages: 1,
+        };
+        let otras_paginas = SearchPlan {
+            query: "a".into(),
+            trending: false,
+            max_pages: 2,
+        };
+        assert_ne!(
+            fp,
+            search_fingerprint(&otra_query),
+            "otra query => otra huella"
+        );
+        assert_ne!(
+            fp,
+            search_fingerprint(&otro_modo),
+            "trending distinto => otra huella"
+        );
+        assert_ne!(
+            fp,
+            search_fingerprint(&otras_paginas),
+            "otras páginas => otra huella"
+        );
+    }
+
+    #[test]
+    fn ideas_fingerprint_estable_y_sensible() {
+        use sdp_core::DemandSignal::{Question, Request};
+        let ideas = vec![idea("angular signals", Question, 2)];
+        // Estable: mismo insumo => misma huella.
+        assert_eq!(ideas_fingerprint(&ideas), ideas_fingerprint(&ideas));
+        // Sensible al título, a la señal y a la cantidad de respaldo.
+        assert_ne!(
+            ideas_fingerprint(&ideas),
+            ideas_fingerprint(&[idea("rxjs", Question, 2)])
+        );
+        assert_ne!(
+            ideas_fingerprint(&ideas),
+            ideas_fingerprint(&[idea("angular signals", Request, 2)]),
+        );
+        assert_ne!(
+            ideas_fingerprint(&ideas),
+            ideas_fingerprint(&[idea("angular signals", Question, 3)]),
+        );
+    }
+
+    #[test]
+    fn ideas_distintas_mueven_el_corpus_hash_del_gate() {
+        use sdp_core::DemandSignal::Question;
+        // El gate liga el token a `hash_texts(ideas_fingerprint(...))`: dos corpus
+        // de ideas distintos deben producir hashes distintos o el TOCTOU (idx 13)
+        // pasa inadvertido y se cobra un insumo por otro.
+        let antes = vec![idea("a", Question, 1)];
+        let despues = vec![idea("a", Question, 2)];
+        assert_ne!(
+            confirm::hash_texts(&ideas_fingerprint(&antes)),
+            confirm::hash_texts(&ideas_fingerprint(&despues)),
+        );
     }
 }

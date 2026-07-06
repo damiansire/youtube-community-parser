@@ -61,6 +61,32 @@ calls. Decisions and scope:
   subprocess anymore). It doesn't reintroduce the old Node-sidecar risk, where
   the key crossed into another process's `env`.
 
+## Cost-confirmation gate threat model
+
+Paid AI operations go through an **estimate → confirm → execute** flow bound by a
+single-use token (`src-tauri/src/confirm.rs`). `estimate_*` returns the exact
+cost plus a token tied to a fingerprint (operation + amount + hash of the corpus
+to process); `run_*` consumes the token and re-checks the fingerprint server-side
+at execution time.
+
+- **What it protects.** **Accidental** spend (you can't execute without going
+  through `estimate_*` first), **TOCTOU** (the amount or corpus can't change
+  between estimating and executing without invalidating the token), and **replay**
+  (the token is one-time-use). This targets the real, frequent risk: a
+  double-click, an accidental retry, or a UI bug spending money on a mismatched
+  amount.
+- **What it does NOT protect (and why that's acceptable here).** It does **not**
+  defend against a **compromised webview**. The token proves that estimate and
+  execution agree — not that a human saw the modal and accepted. A front with
+  arbitrary code execution (e.g. `withGlobalTauri: true` + XSS) can call
+  `estimate_*` itself to mint a legitimate token and chain it into `run_*`,
+  spending without ever showing a modal. Truly defending that case requires the
+  **backend** to drive confirmation (a native dialog via `tauri-plugin-dialog`
+  inside `run_*`), not the webview. It is deferred on purpose: for a single-user
+  desktop app, a front running arbitrary code already controls the session (the
+  same boundary as the API-key threat model above). It stays as an optional
+  hardening if the app ever loads untrusted web content.
+
 ## Requirements
 
 - **Rust + Cargo** with the **MSVC** toolchain (`stable-x86_64-pc-windows-msvc`).
@@ -97,6 +123,7 @@ In-progress conversion of the original parser (Node, 2021) into a tracking syste
 in Rust. Done: tested domain, **native ingestion in Rust** (reqwest, no Node
 sidecar — the app is distributable), **local persistence (SQLite) wired** to the
 commands (each analysis is saved and `analyze_history` re-analyzes without
-spending quota), **configurable quota caps** with partial results (F4), app
-scaffold and UI. Pending: packaging/installing the desktop app (requires the
-Build Tools above) and, optionally, a "view history" button in the UI.
+spending quota), **configurable quota caps** with partial results (F4), a **"view
+accumulated history" button** that re-analyzes the local store without spending
+quota, app scaffold and UI. Pending: packaging/installing the desktop app
+(requires the Build Tools above).

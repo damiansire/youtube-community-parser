@@ -1,11 +1,10 @@
 //! Gate de confirmación con **token de un solo uso** (auditoría P1).
 //!
-//! El gate de dinero/cuota era evadible: `run_*` aceptaba un `confirmed: bool`
-//! crudo del front, así que cualquier caller IPC (o un front comprometido con
-//! `withGlobalTauri: true`) pasaba `confirmed: true` y gastaba plata/cuota sin
-//! ver jamás el modal.
+//! Antes, `run_*` aceptaba un `confirmed: bool` crudo del front: un doble-click,
+//! un retry accidental o un bug de UI que mandara `confirmed: true` gastaba
+//! plata/cuota sin que el monto confirmado tuviera relación con el ejecutado.
 //!
-//! Acá el contrato es **estimar → confirmar → ejecutar** ligado por un token:
+//! El contrato es **estimar → confirmar → ejecutar** ligado por un token:
 //! - `estimate_*` calcula el costo y emite un `confirmation_token` (nonce) ligado
 //!   a un **fingerprint** (tipo de operación + monto exacto + hash del corpus que
 //!   se va a procesar);
@@ -15,6 +14,24 @@
 //!   re-calculado server-side **en el momento de ejecutar**. Si el corpus cambió
 //!   entre estimar y ejecutar (TOCTOU, auditoría idx 13), el hash no coincide y
 //!   se rechaza: lo confirmado == lo ejecutado.
+//!
+//! # Qué protege este gate (y qué NO)
+//!
+//! **Protege** contra: gasto **accidental** (no se puede ejecutar sin pasar por
+//! `estimate_*` primero), **TOCTOU** (el monto/corpus no puede cambiar entre
+//! estimar y ejecutar sin invalidar el token) y **replay** (un solo uso).
+//!
+//! **NO protege** contra un **webview comprometido / caller IPC malicioso.** El
+//! token NO prueba que un humano vio el modal y aceptó: prueba que estimación y
+//! ejecución coinciden. Un front comprometido (p. ej. `withGlobalTauri: true` +
+//! XSS) puede llamar `estimate_*` él mismo —no tiene gate— para acuñar un token
+//! legítimo y encadenarlo a `run_*`, gastando sin mostrar modal. Defender ese
+//! caso exige que la confirmación la dispare el **backend** (diálogo nativo vía
+//! el plugin `tauri-plugin-dialog` dentro de `run_*`), no el webview. Se difiere
+//! a propósito: para una app de escritorio mono-usuario, un front con ejecución
+//! de código arbitrario ya controla la sesión (mismo límite que el threat-model
+//! de la API key). Este gate ataca el riesgo real y frecuente —el error humano—,
+//! no un webview hostil.
 //!
 //! Las operaciones gratis (`requires_confirmation = false`) no necesitan token.
 
