@@ -10,6 +10,7 @@ const els = {
   target: $("target"),
   apikey: $("apikey"),
   run: $("run"),
+  history: $("history"),
   demo: $("demo"),
   status: $("status"),
   empty: $("empty"),
@@ -32,6 +33,7 @@ function setStatus(msg, kind) {
 
 function busy(on) {
   els.run.disabled = on;
+  els.history.disabled = on;
   els.demo.disabled = on;
 }
 
@@ -255,6 +257,31 @@ async function analyzeDemo() {
   setStatus("Mostrando datos de ejemplo.");
   try {
     render(await invoke("analyze_demo"));
+  } catch (err) {
+    setStatus(String(err), "error");
+  } finally {
+    busy(false);
+  }
+}
+
+// Reanaliza el histórico local ya persistido (SQLite), sin pegarle a la API ni
+// gastar cuota: es la razón de ser de sdp-storage (F3). El backend ya expone
+// `analyze_history`; acá lo cableamos a la UI reusando `render` (el shape es el
+// mismo que analyze_video/channel). Si todavía no hay histórico, avisamos en vez
+// de mostrar una vista vacía.
+async function analyzeHistory() {
+  busy(true);
+  setStatus("Leyendo el histórico acumulado…");
+  try {
+    const analysis = await invoke("analyze_history");
+    if (!analysis.total_comments) {
+      setStatus("Todavía no hay histórico: analizá un canal o video primero.", "error");
+      return;
+    }
+    render(analysis);
+    setStatus(
+      `Histórico: ${analysis.total_commenters} personas en ${analysis.total_comments} comentarios acumulados.`,
+    );
   } catch (err) {
     setStatus(String(err), "error");
   } finally {
@@ -871,6 +898,7 @@ els.form.addEventListener("submit", (e) => {
   e.preventDefault();
   analyzeReal();
 });
+els.history.addEventListener("click", analyzeHistory);
 els.demo.addEventListener("click", analyzeDemo);
 tools.corpusRun.addEventListener("click", analyzeCorpus);
 tools.metaRun.addEventListener("click", fetchMeta);
@@ -892,6 +920,7 @@ updateSearchCost();
 if (!invoke) {
   setStatus("Abrí esta interfaz desde la app de escritorio.", "error");
   els.run.disabled = true;
+  els.history.disabled = true;
   els.demo.disabled = true;
   tools.corpusRun.disabled = true;
   tools.metaRun.disabled = true;
