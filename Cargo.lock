@@ -2890,6 +2890,7 @@ name = "sdp-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "rand",
  "reqwest 0.12.28",
  "sdp-core",
  "sdp-llm",

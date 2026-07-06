@@ -4,8 +4,9 @@
 //! la respuesta; este crate sólo hace la llamada HTTP.
 //!
 //! Sigue los patrones de `genai-app-patterns`: contrato versionable por
-//! proveedor, **retry header-aware** (respeta `retry-after` en 429 con backoff
-//! exponencial) y parseo tolerante (el parseo robusto del texto vive en el core).
+//! proveedor, **retry header-aware** de los fallos transitorios del server (429 y
+//! 5xx/529, respetando `retry-after` con backoff exponencial) y parseo tolerante
+//! (el parseo robusto del texto vive en el core).
 //!
 //! La key se guarda en `SecretString` (F2): no se loguea ni se imprime por
 //! `Debug`, y se expone el menor tiempo posible.
@@ -52,15 +53,28 @@ pub trait InsightProvider: Send + Sync {
     async fn enhance(&self, prompt: &EnhancePrompt) -> Result<String, LlmError>;
 }
 
-/// Backoff exponencial en segundos (1, 2, 4, …) usado cuando 429 no trae
-/// `retry-after`.
+/// Backoff exponencial en segundos (1, 2, 4, …) usado cuando la respuesta no
+/// trae `retry-after`.
 fn backoff_secs(attempt: u32) -> u64 {
     1u64 << attempt
 }
 
-/// Envía un request reconstruyéndolo en cada intento; ante 429 espera
-/// `retry-after` (o backoff) y reintenta hasta `MAX_RETRIES`. Cualquier otra
-/// respuesta (éxito o error) se devuelve tal cual.
+/// ¿El status HTTP es transitorio y del **lado del proveedor**? 429 (rate limit)
+/// y la familia 5xx —incluido el 529 "overloaded" de Anthropic—. Son fallos que
+/// el server señala explícitamente y que **no cobran**, así que reintentar es
+/// seguro. Los 4xx (salvo 429) son del request: reintentarlos es inútil.
+fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
+/// Envía un request reconstruyéndolo en cada intento; ante un fallo **transitorio
+/// señalado por el server** (429 o 5xx/529) espera `retry-after` (o backoff) y
+/// reintenta hasta `MAX_RETRIES`. Cualquier otra respuesta se devuelve tal cual.
+///
+/// Un **error de red** (timeout/conexión) NO se reintenta acá a propósito: sin
+/// idempotency-key hacia el proveedor, un POST que falló la *respuesta* pudo
+/// haberse procesado —y cobrado— igual, así que un retry ciego arriesgaría doble
+/// gasto en la ruta que cuesta plata. Se propaga para que el caller decida.
 async fn send_with_retry<F>(make: F) -> Result<reqwest::Response, LlmError>
 where
     F: Fn() -> reqwest::RequestBuilder,
@@ -68,9 +82,15 @@ where
     let mut attempt = 0;
     loop {
         let resp = make().send().await?;
-        if resp.status().as_u16() == 429 {
+        let status = resp.status().as_u16();
+        if is_retryable_status(status) {
             if attempt >= MAX_RETRIES {
-                return Err(LlmError::RateLimited(attempt));
+                // Agotados los reintentos: 429 => RateLimited; 5xx => Api con cuerpo.
+                return Err(if status == 429 {
+                    LlmError::RateLimited(attempt)
+                } else {
+                    api_error(resp).await
+                });
             }
             let wait = resp
                 .headers()
@@ -400,6 +420,45 @@ mod tests {
         let p =
             AnthropicProvider::with_base(key(), "claude-opus-4-8".into(), server.uri()).unwrap();
         assert_eq!(p.enhance(&prompt()).await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn reintenta_ante_5xx_transitorio_y_luego_responde() {
+        let server = MockServer::start().await;
+        // 503 del proveedor (transitorio, no cobra) => debe reintentar, no propagar.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "0"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"type": "text", "text": "ok"}]
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let p = AnthropicProvider::with_base(key(), "m".into(), server.uri()).unwrap();
+        assert_eq!(p.enhance(&prompt()).await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn cinco_xx_persistente_se_clasifica_como_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(529).insert_header("retry-after", "0"))
+            .mount(&server)
+            .await;
+
+        let p = AnthropicProvider::with_base(key(), "m".into(), server.uri()).unwrap();
+        assert!(matches!(
+            p.enhance(&prompt()).await,
+            Err(LlmError::Api { status: 529, .. })
+        ));
     }
 
     #[tokio::test]

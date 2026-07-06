@@ -111,7 +111,7 @@ impl From<ConfirmError> for CommandError {
                 "falta el token de confirmación; estimá la operación y confirmá el modal"
             }
             ConfirmError::Unknown => {
-                "el token de confirmación no es válido (ya se usó o expiró); volvé a estimar"
+                "el token de confirmación no es válido (ya se usó o es inventado); volvé a estimar"
             }
             ConfirmError::Mismatch => {
                 "los datos cambiaron desde que confirmaste; volvé a estimar y confirmá de nuevo"

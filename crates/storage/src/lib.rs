@@ -1,8 +1,8 @@
 //! Persistencia local en SQLite del histórico de comentarios y comentaristas.
 //!
-//! Guarda lo que ingiere el sidecar para poder analizar la evolución de la
-//! comunidad en el tiempo, sin volver a pegarle a la API. El dominio
-//! (`sdp-core`) sigue siendo puro: acá vive el efecto de I/O.
+//! Guarda lo que ingiere el cliente nativo de YouTube para poder analizar la
+//! evolución de la comunidad en el tiempo, sin volver a pegarle a la API. El
+//! dominio (`sdp-core`) sigue siendo puro: acá vive el efecto de I/O.
 
 use std::path::Path;
 

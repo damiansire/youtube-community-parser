@@ -78,13 +78,19 @@ pub fn hash_texts<S: AsRef<str>>(texts: &[S]) -> u64 {
     h.finish()
 }
 
+/// Tope de tokens pendientes. Un `estimate_*` que nunca se confirma dejaría un
+/// token huérfano para siempre; al llegar al tope se evicta el más viejo, así el
+/// store no crece sin límite (auditoría: `ConfirmStore.pending` sin cap).
+const MAX_PENDING: usize = 256;
+
 /// Almacén de tokens de confirmación pendientes (vive en `tauri::State`).
 ///
 /// Cada token es de **un solo uso**: `consume` lo saca del mapa, así que un
-/// replay del mismo token (o un caller que se inventa uno) falla.
+/// replay del mismo token (o un caller que se inventa uno) falla. El valor guarda
+/// el `seq` de emisión junto al fingerprint para poder evictar el más viejo.
 #[derive(Default)]
 pub struct ConfirmStore {
-    pending: Mutex<HashMap<String, OpFingerprint>>,
+    pending: Mutex<HashMap<String, (u64, OpFingerprint)>>,
     seq: Mutex<u64>,
 }
 
@@ -93,7 +99,8 @@ pub struct ConfirmStore {
 pub enum ConfirmError {
     /// No se mandó token para una operación que sí requiere confirmación.
     Missing,
-    /// El token no existe (ya se usó, expiró o es inventado).
+    /// El token no existe: ya se usó (un solo uso) o es inventado. (No hay
+    /// expiración por tiempo: no se afirma un control que no existe.)
     Unknown,
     /// El token existe pero su fingerprint no coincide con el re-calculado
     /// server-side (cambió el monto o el corpus entre estimar y ejecutar).
@@ -108,19 +115,28 @@ impl ConfirmStore {
     /// Emite un token nuevo para `fingerprint` y lo registra como pendiente.
     /// Devuelve el token opaco que el front debe devolver al confirmar.
     pub fn issue(&self, fingerprint: OpFingerprint) -> String {
-        let token = {
+        let seq_val = {
             let mut seq = self.seq.lock().expect("lock seq");
             *seq += 1;
-            // Token opaco: secuencia + hash del fingerprint. No revela datos.
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            fingerprint.hash(&mut h);
-            seq.hash(&mut h);
-            format!("ct_{:016x}{:08x}", h.finish(), *seq)
+            *seq
         };
-        self.pending
-            .lock()
-            .expect("lock pending")
-            .insert(token.clone(), fingerprint);
+        // Token opaco con **128 bits de entropía del RNG del SO** + la secuencia
+        // (unicidad aunque el RNG repitiera). Es un control de seguridad: sin la
+        // entropía, un atacante podría derivar el token del esquema. No revela datos.
+        let nonce: u128 = rand::random();
+        let token = format!("ct_{nonce:032x}{seq_val:08x}");
+        let mut pending = self.pending.lock().expect("lock pending");
+        // Cap de memoria: al llegar al tope, evicta el más viejo (menor seq).
+        if pending.len() >= MAX_PENDING {
+            if let Some(oldest) = pending
+                .iter()
+                .min_by_key(|(_, (s, _))| *s)
+                .map(|(k, _)| k.clone())
+            {
+                pending.remove(&oldest);
+            }
+        }
+        pending.insert(token.clone(), (seq_val, fingerprint));
         token
     }
 
@@ -137,7 +153,7 @@ impl ConfirmStore {
         let mut pending = self.pending.lock().expect("lock pending");
         match pending.remove(token) {
             None => Err(ConfirmError::Unknown),
-            Some(fp) if &fp == expected => Ok(()),
+            Some((_, fp)) if &fp == expected => Ok(()),
             Some(_) => Err(ConfirmError::Mismatch),
         }
     }
@@ -227,5 +243,16 @@ mod tests {
         let store = ConfirmStore::new();
         let fp = OpFingerprint::new("op", &est_money(1), 1);
         assert_ne!(store.issue(fp.clone()), store.issue(fp));
+    }
+
+    #[test]
+    fn pending_no_crece_sin_limite() {
+        // Emitir muchos tokens sin confirmarlos no debe hacer crecer el store más
+        // allá del cap: el más viejo se evicta (auditoría: pending sin TTL/cap).
+        let store = ConfirmStore::new();
+        for i in 0..(MAX_PENDING + 50) {
+            store.issue(OpFingerprint::new("op", &est_money(i as u64 + 1), i as u64));
+        }
+        assert!(store.pending.lock().unwrap().len() <= MAX_PENDING);
     }
 }
