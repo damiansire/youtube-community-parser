@@ -25,6 +25,8 @@ tokio.workspace = true
 secrecy.workspace = true
 urlencoding.workspace = true
 rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 sdp-core = { path = "../crates/core" }
 sdp-storage = { path = "../crates/storage" }
 sdp-llm = { path = "../crates/llm" }

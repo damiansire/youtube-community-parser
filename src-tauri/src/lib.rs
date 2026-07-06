@@ -281,9 +281,12 @@ where
 {
     let db = app.state::<Db>().handle();
     tokio::task::spawn_blocking(move || -> Result<T, CommandError> {
-        let mut store = db
-            .lock()
-            .map_err(|_| CommandError::Task("la conexión a la base quedó envenenada".into()))?;
+        let mut store = db.lock().map_err(|_| {
+            // Boundary tragado: sin log, un lock envenenado (panic en otra tarea
+            // con la conexión tomada) desaparecía sin rastro (arquitectura #8).
+            tracing::error!("la conexión SQLite quedó envenenada (mutex poisoned)");
+            CommandError::Task("la conexión a la base quedó envenenada".into())
+        })?;
         Ok(f(&mut store)?)
     })
     .await
@@ -451,6 +454,9 @@ async fn refine_ideas_ai(
         corpus_hash,
         confirmation_token.as_deref(),
     )?;
+    // Gate confirmado: rastro del gasto real (op + monto), sin exponer el corpus
+    // ni la key, para poder auditar un eventual "me cobró de más".
+    tracing::info!(op = %op, ideas = ideas.len(), cost = ?estimate.kind, "refinado IA pago confirmado; ejecutando");
 
     let prompt = sdp_core::build_ideas_prompt(&ideas);
     // Tope de salida derivado del presupuesto: lo ejecutado == lo estimado.
@@ -570,7 +576,16 @@ async fn run_search(
         corpus_hash,
         confirmation_token.as_deref(),
     )?;
-    Ok(client(api_key)?.search(&plan).await?)
+    // Cuota confirmada (100u/página): dejamos rastro del gasto y del corte parcial.
+    tracing::info!(query = %plan.query, trending = plan.trending, max_pages = plan.max_pages, "búsqueda paga confirmada; ejecutando");
+    let results = client(api_key)?.search(&plan).await?;
+    if results.incomplete {
+        tracing::warn!(
+            hits = results.hits.len(),
+            "búsqueda cortada por cuota; resultados parciales"
+        );
+    }
+    Ok(results)
 }
 
 /// Compara mi canal contra competidores (F11) usando la metadata de videos ya
@@ -637,6 +652,15 @@ fn init_db(app: &tauri::AppHandle) -> Result<Db, Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Observabilidad estructurada, configurable por `RUST_LOG` (default `info`).
+    // Sin esto, un cobro o consumo de cuota errado no dejaba ningún rastro para
+    // diagnosticar (auditoría: boundaries que gastan plata deben loguear).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
     tauri::Builder::default()
         .manage(ConfirmStore::new())
         .setup(|app| {

@@ -30,6 +30,10 @@ async-trait = "0.1"
 # RNG del SO para el nonce del token de confirmación (auditoría: el token es un
 # control de seguridad; debe tener entropía real, no ser derivable).
 rand = "0.9"
+# Observabilidad estructurada en los boundaries que gastan plata/cuota (auditoría:
+# una app de red con APIs pagas sin ningún rastro es la omisión más cara).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Servidor HTTP mockeado para tests de los adaptadores (sin red real).
 wiremock = "0.6"
 
