@@ -1,5 +1,8 @@
 # Subscriber Data Parser
 
+[![CI](https://github.com/damiansire/youtube-community-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/damiansire/youtube-community-parser/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A desktop app to **get to know your YouTube community**: from the comments of a
 channel or a video, it shows who comments the **most**, who comments the
 **least**, and the overall shape of your community.
@@ -13,7 +16,7 @@ better. Use it ethically and for the common good.
 channel / video
    │
    ▼
-[ src-tauri/youtube.rs ]  native client (reqwest, async): hits the
+[ src-tauri/src/youtube.rs ]  native client (reqwest, async): hits the
    │                       YouTube Data API v3 (commentThreads/playlistItems) → core types
    ▼
 [ sdp-core ]    pure Rust domain: models + rankings (testable, UI-free)
@@ -34,7 +37,8 @@ source tree on the end user's machine).
 |------------------|----------------------------------------------------------------------|
 | `crates/core`    | Domain: `Commenter`, `Comment` and the rankings. No network, no UI.  |
 | `crates/storage` | Local SQLite persistence of the history. Each analysis is saved (idempotent upsert) and `analyze_history` re-analyzes it without spending quota again. |
-| `src-tauri`      | Tauri v2 backend + native YouTube client (`youtube.rs`).             |
+| `crates/llm`     | `sdp-llm`: multi-provider AI refinement layer (async `dyn`-compatible trait) behind the paid cost-confirmation gate. Adapters tested against a mocked HTTP server (`wiremock`), no real network. |
+| `src-tauri`      | Tauri v2 backend + native YouTube client (`src/youtube.rs`).         |
 | `app`            | Webview frontend.                                                    |
 
 ## API key threat model
@@ -104,8 +108,8 @@ at execution time.
 ## Development
 
 ```bash
-# Domain tests (pure Rust, works with any toolchain)
-cargo test -p sdp-core
+# Domain + AI-layer tests (pure Rust, works with any toolchain)
+cargo test -p sdp-core -p sdp-llm
 
 # Native YouTube client + persistence tests (requires MSVC to link)
 cargo test -p sdp-desktop -p sdp-storage

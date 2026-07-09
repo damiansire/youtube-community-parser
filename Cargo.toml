@@ -7,7 +7,7 @@ edition = "2021"
 rust-version = "1.77"
 license = "MIT"
 authors = ["Damian Sire <damiansire@gmail.com>"]
-repository = "https://github.com/damiansire/Subscriptor-Data-Parser"
+repository = "https://github.com/damiansire/youtube-community-parser"
 
 # Versiones pinneadas una sola vez; cada crate hace `dep.workspace = true`.
 [workspace.dependencies]

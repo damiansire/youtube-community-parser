@@ -1,0 +1,48 @@
+# Chequeo de links y badges del README (prevención de doc-drift): valida en cada
+# push/PR que los enlaces y badges del README.md (y demás .md versionados) sigan
+# resolviendo. Nació de un badge de CI roto y un README stale detectados en otro
+# repo; este job convierte esa revisión manual en un gate ejecutable.
+name: Links
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "**/*.md"
+      - ".lycheeignore"
+      - ".github/workflows/links.yml"
+  pull_request:
+    paths:
+      - "**/*.md"
+      - ".lycheeignore"
+      - ".github/workflows/links.yml"
+  # Corrida programada: un link externo puede morir sin que cambie el repo.
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: lychee (README + docs .md)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Chequear links con lychee
+        uses: lycheeverse/lychee-action@v2
+        with:
+          # README primero; el resto de la doc versionada va detrás. Se cachea
+          # para no re-pegarle a los endpoints en cada corrida y se excluyen
+          # localhost / IPs privadas (los fragmentos internos #ancla no se
+          # verifican por defecto, así que no hace falta ignorarlos).
+          args: >-
+            --no-progress
+            --cache
+            --max-cache-age 1d
+            --exclude-all-private
+            --max-retries 3
+            README.md
+            ./**/*.md
+          fail: true
