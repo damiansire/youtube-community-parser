@@ -46,16 +46,9 @@ const initials = (name, id) => {
 
 const displayName = (s) => s.display_name || s.channel_id;
 
-// Escapa texto remoto antes de interpolarlo en innerHTML. Los nombres de canal
-// (display_name/channel_id) son datos de terceros: sin esto, `<img src=...>` o
-// `<style>` se inyectan tal cual.
-const escapeHtml = (value) =>
-  String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+// `escapeHtml` vive en lib/escape-html.js (cargado antes que este script en
+// index.html) — extraído para poder testearlo con Node sin navegador, ver
+// app/lib/escape-html.test.js. Sigue siendo un global, igual que antes.
 
 const fmtDate = (iso) =>
   new Date(iso).toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" });
