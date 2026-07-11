@@ -541,4 +541,82 @@ mod tests {
         let k = SecretString::from("AIza-super-secreta".to_string());
         assert!(!format!("{k:?}").contains("AIza-super-secreta"));
     }
+
+    // ── ycp-1: fallos de red/API del proveedor (timeout, respuesta malformada) ──
+
+    #[tokio::test]
+    async fn anthropic_responde_malformado_se_clasifica_como_shape() {
+        let server = MockServer::start().await;
+        // 200 pero sin ningun bloque "type":"text" — la forma que `enhance` no
+        // sabe interpretar. No debe panicar ni confundirse con un error de red.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"type": "thinking", "text": "solo pensando, sin bloque de texto"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let p = AnthropicProvider::with_base(key(), "m".into(), server.uri()).unwrap();
+        let err = p.enhance(&prompt()).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::Shape(_)),
+            "esperaba Shape, fue {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_responde_sin_candidates_se_clasifica_como_shape() {
+        let server = MockServer::start().await;
+        // 200 pero "candidates" vacio — respuesta bien formada como JSON pero sin
+        // el contenido que `enhance` necesita.
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-2.5-flash:generateContent"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "candidates": [] })),
+            )
+            .mount(&server)
+            .await;
+
+        let p = GeminiProvider::with_base(key(), "gemini-2.5-flash".into(), server.uri()).unwrap();
+        let err = p.enhance(&prompt()).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::Shape(_)),
+            "esperaba Shape, fue {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_ante_json_invalido_no_panica_y_devuelve_error_http() {
+        let server = MockServer::start().await;
+        // 200 con un body que ni siquiera es JSON valido: `resp.json()` debe
+        // fallar como error de deserializacion (mapeado a Http via `#[from]`),
+        // nunca panicar sobre una respuesta "exitosa" pero corrupta.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("esto no es json"))
+            .mount(&server)
+            .await;
+
+        let p = AnthropicProvider::with_base(key(), "m".into(), server.uri()).unwrap();
+        let err = p.enhance(&prompt()).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::Http(_)),
+            "esperaba Http, fue {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_ante_conexion_rechazada_devuelve_error_http_no_panica() {
+        // Puerto sin listener: falla a nivel de conexion TCP, no de HTTP status —
+        // es el camino de "error de red" (timeout/conexion) que send_with_retry
+        // deliberadamente NO reintenta (ver su doc comment) y propaga tal cual.
+        let p =
+            AnthropicProvider::with_base(key(), "m".into(), "http://127.0.0.1:1".into()).unwrap();
+        let err = p.enhance(&prompt()).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::Http(_)),
+            "esperaba Http, fue {err:?}"
+        );
+    }
 }

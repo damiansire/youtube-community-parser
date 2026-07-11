@@ -11,3 +11,7 @@ node_modules
 
 # Entorno
 .env
+
+# Fragua audit reports (local only)
+_audit/
+_audits/

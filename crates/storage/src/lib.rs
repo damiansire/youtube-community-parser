@@ -22,6 +22,11 @@ pub enum StoreError {
 
 type Result<T> = std::result::Result<T, StoreError>;
 
+/// Versión actual del esquema. Cada entrada nueva de la tabla de migración en
+/// [`Store::migrate`] sube este número en uno — nunca se saltea una versión ni
+/// se reescribe una migración ya publicada (rompería bases existentes).
+const SCHEMA_VERSION: i64 = 2;
+
 /// Conexión a la base local.
 pub struct Store {
     conn: Connection,
@@ -48,36 +53,66 @@ impl Store {
         // inocuo: SQLite lo ignora y queda en `memory`.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS commenter (
-                channel_id        TEXT PRIMARY KEY,
-                display_name      TEXT NOT NULL,
-                profile_image_url TEXT,
-                channel_url       TEXT
-            );
-            CREATE TABLE IF NOT EXISTS comment (
-                id                TEXT PRIMARY KEY,
-                video_id          TEXT NOT NULL,
-                author_channel_id TEXT NOT NULL,
-                text              TEXT NOT NULL,
-                like_count        INTEGER NOT NULL,
-                published_at      TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_comment_author
-                ON comment(author_channel_id);
-            CREATE TABLE IF NOT EXISTS video_meta (
-                video_id      TEXT PRIMARY KEY,
-                channel_id    TEXT NOT NULL,
-                title         TEXT NOT NULL,
-                description   TEXT NOT NULL,
-                tags          TEXT NOT NULL,
-                view_count    INTEGER,
-                like_count    INTEGER,
-                comment_count INTEGER,
-                published_at  TEXT NOT NULL
-            );",
-        )?;
-        Ok(Store { conn })
+        let mut store = Store { conn };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Aplica las migraciones pendientes según `PRAGMA user_version`. Cada
+    /// bloque es idempotente (`IF NOT EXISTS`) y se ejecuta sobre el `version`
+    /// leído al inicio — no se re-lee entre bloques a propósito, así una base
+    /// nueva (version=0) corre TODOS los bloques en orden en una sola pasada,
+    /// no solo el primero.
+    fn migrate(&mut self) -> Result<()> {
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+
+        if version < 1 {
+            self.conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS commenter (
+                    channel_id        TEXT PRIMARY KEY,
+                    display_name      TEXT NOT NULL,
+                    profile_image_url TEXT,
+                    channel_url       TEXT
+                );
+                CREATE TABLE IF NOT EXISTS comment (
+                    id                TEXT PRIMARY KEY,
+                    video_id          TEXT NOT NULL,
+                    author_channel_id TEXT NOT NULL,
+                    text              TEXT NOT NULL,
+                    like_count        INTEGER NOT NULL,
+                    published_at      TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_comment_author
+                    ON comment(author_channel_id);
+                CREATE TABLE IF NOT EXISTS video_meta (
+                    video_id      TEXT PRIMARY KEY,
+                    channel_id    TEXT NOT NULL,
+                    title         TEXT NOT NULL,
+                    description   TEXT NOT NULL,
+                    tags          TEXT NOT NULL,
+                    view_count    INTEGER,
+                    like_count    INTEGER,
+                    comment_count INTEGER,
+                    published_at  TEXT NOT NULL
+                );",
+            )?;
+        }
+
+        if version < 2 {
+            // `all_video_meta`/consultas por canal no tenían índice — la única
+            // columna indexada era `comment.author_channel_id`. Bases creadas
+            // antes de esta migración quedan con el índice al abrir de nuevo.
+            self.conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_video_meta_channel
+                    ON video_meta(channel_id);",
+            )?;
+        }
+
+        self.conn
+            .pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        Ok(())
     }
 
     /// Modo de journal activo (`"wal"`, `"memory"`, …). Se expone para verificar
@@ -391,6 +426,139 @@ mod tests {
         let metas = store.all_video_meta().unwrap();
         assert_eq!(metas.len(), 1, "mismo id no duplica");
         assert_eq!(metas[0].view_count, Some(999), "actualiza el valor");
+    }
+
+    // ── ycp-2: migración de esquema y datos corruptos ──────────────────────
+
+    #[test]
+    fn base_nueva_queda_en_la_version_actual_del_esquema() {
+        let store = Store::open_in_memory().unwrap();
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migra_una_base_v1_a_la_version_actual_creando_el_indice_nuevo() {
+        // Simula una base real creada por una versión anterior del código: solo
+        // las tablas de la migración v1 (sin el índice de video_meta.channel_id
+        // que agrega v2), con user_version=1 seteado a mano.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE commenter (
+                channel_id        TEXT PRIMARY KEY,
+                display_name      TEXT NOT NULL,
+                profile_image_url TEXT,
+                channel_url       TEXT
+            );
+            CREATE TABLE comment (
+                id                TEXT PRIMARY KEY,
+                video_id          TEXT NOT NULL,
+                author_channel_id TEXT NOT NULL,
+                text              TEXT NOT NULL,
+                like_count        INTEGER NOT NULL,
+                published_at      TEXT NOT NULL
+            );
+            CREATE INDEX idx_comment_author ON comment(author_channel_id);
+            CREATE TABLE video_meta (
+                video_id      TEXT PRIMARY KEY,
+                channel_id    TEXT NOT NULL,
+                title         TEXT NOT NULL,
+                description   TEXT NOT NULL,
+                tags          TEXT NOT NULL,
+                view_count    INTEGER,
+                like_count    INTEGER,
+                comment_count INTEGER,
+                published_at  TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+
+        // Abrir con el código actual debe migrar v1 -> v2 sin perder nada.
+        let store = Store::from_conn(conn).unwrap();
+
+        let version: i64 = store
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let has_index: bool = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_video_meta_channel'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(
+            has_index,
+            "la migracion v2 debe crear idx_video_meta_channel"
+        );
+    }
+
+    #[test]
+    fn migra_una_base_v1_con_datos_reales_preservandolos() {
+        // La migración no debe tocar filas existentes, solo agregar el índice.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE commenter (channel_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, profile_image_url TEXT, channel_url TEXT);
+             CREATE TABLE comment (id TEXT PRIMARY KEY, video_id TEXT NOT NULL, author_channel_id TEXT NOT NULL, text TEXT NOT NULL, like_count INTEGER NOT NULL, published_at TEXT NOT NULL);
+             CREATE TABLE video_meta (video_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, tags TEXT NOT NULL, view_count INTEGER, like_count INTEGER, comment_count INTEGER, published_at TEXT NOT NULL);
+             INSERT INTO commenter VALUES ('ana', 'Ana', NULL, NULL);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+
+        let store = Store::from_conn(conn).unwrap();
+        let commenters = store.all_commenters().unwrap();
+        assert_eq!(commenters.len(), 1);
+        assert_eq!(commenters[0].display_name, "Ana");
+    }
+
+    #[test]
+    fn comentario_con_fecha_corrupta_devuelve_error_en_vez_de_panicar() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.save_comments(&[comment("c1", "ana", 1, 10)]).unwrap();
+        // Corrompe la fecha directo por SQL (bypass del tipo Rust): simula datos
+        // parciales/corruptos que llegaron a la base por otra vía (migración
+        // externa, edición manual, bug de otra versión).
+        store
+            .conn
+            .execute(
+                "UPDATE comment SET published_at = 'no-es-una-fecha' WHERE id = 'c1'",
+                [],
+            )
+            .unwrap();
+
+        let err = store.all_comments().unwrap_err();
+        assert!(
+            matches!(err, StoreError::Date(_)),
+            "esperaba StoreError::Date, fue {err:?}"
+        );
+    }
+
+    #[test]
+    fn video_meta_con_tags_json_corrupto_devuelve_error_en_vez_de_panicar() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.save_video_meta(&[video_meta("v1", Some(1))]).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE video_meta SET tags = '{esto no es json valido' WHERE video_id = 'v1'",
+                [],
+            )
+            .unwrap();
+
+        let err = store.all_video_meta().unwrap_err();
+        assert!(
+            matches!(err, StoreError::Json(_)),
+            "esperaba StoreError::Json, fue {err:?}"
+        );
     }
 
     #[test]
