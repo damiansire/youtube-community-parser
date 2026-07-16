@@ -36,3 +36,6 @@ sdp-llm = { path = "../crates/llm" }
 wiremock = "0.6"
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "rt"] }
+# `tauri::test::mock_builder`/`get_ipc_response` para invocar un comando real
+# desde el borde IPC (mismo camino que usa el frontend) en tests (ycp-3).
+tauri = { workspace = true, features = ["test"] }
