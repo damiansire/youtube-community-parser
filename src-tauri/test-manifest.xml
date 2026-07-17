@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!--
+    Manifest mínimo para los HARNESS DE TEST de sdp-desktop (ver build.rs).
+    Activa Common-Controls v6: tauri linkea comctl32!TaskDialogIndirect, que
+    solo existe en la v6 side-by-side. tauri-build ya embebe esto en los
+    binarios de la app; los exes de `cargo test` no lo heredan.
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

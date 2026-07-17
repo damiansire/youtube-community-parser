@@ -232,12 +232,29 @@ fn sample() -> (Vec<Comment>, Vec<Commenter>) {
     (comments, commenters)
 }
 
-/// Análisis de demostración (sin red): permite ver la UI ya.
-#[tauri::command]
-fn analyze_demo() -> Analysis {
-    let (comments, commenters) = sample();
-    Analysis::build(&comments, &commenters, 3)
+/// Comandos expuestos también fuera del crate (hoy solo `analyze_demo`), para
+/// que `tests/ipc_boundary.rs` pueda registrarlos con `generate_handler!` e
+/// invocarlos desde el borde IPC real. Esos tests viven como test de
+/// integración (no unitario) a propósito: `tauri::test` linkea
+/// `comctl32!TaskDialogIndirect` (v6, activada por manifest) y solo los targets
+/// `[[test]]` reciben el manifest de `build.rs` vía `rustc-link-arg-tests`; en
+/// el harness unitario el exe muere al cargar con STATUS_ENTRYPOINT_NOT_FOUND.
+///
+/// Va en un módulo (no en la raíz del crate) porque un `#[tauri::command] pub`
+/// en la raíz colisiona consigo mismo: el macro genera `#[macro_export]` (que
+/// cuelga el macro `__cmd__*` de la raíz) más un `pub use` local, y en la raíz
+/// ambos nombres caen en el mismo namespace (E0255).
+pub mod demo {
+    use super::{sample, Analysis};
+
+    /// Análisis de demostración (sin red): permite ver la UI ya.
+    #[tauri::command]
+    pub fn analyze_demo() -> Analysis {
+        let (comments, commenters) = sample();
+        Analysis::build(&comments, &commenters, 3)
+    }
 }
+pub use demo::analyze_demo;
 
 /// Envuelve la API key en `SecretString` en cuanto cruza el IPC, para
 /// minimizar el tiempo que vive en claro en memoria (F2). Ver `youtube.rs`.
@@ -670,7 +687,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            analyze_demo,
+            demo::analyze_demo,
             analyze_video,
             analyze_channel,
             analyze_history,
@@ -895,112 +912,6 @@ mod tests {
         assert_ne!(
             confirm::hash_texts(&ideas_fingerprint(&antes)),
             confirm::hash_texts(&ideas_fingerprint(&despues)),
-        );
-    }
-}
-
-/// Tests desde el borde IPC (ycp-3): invocan un comando `#[tauri::command]` REAL
-/// tal como lo haría el frontend (`invoke("analyze_demo")`), en vez de llamar la
-/// función Rust directo. Cubren que el comando está registrado en
-/// `generate_handler!` (un comando ausente ahí falla en runtime, no en compile-time)
-/// y que la serialización de la respuesta cruza el límite IPC intacta.
-///
-/// `analyze_demo` se eligió porque corre lógica de dominio real (ranking +
-/// extremos top/bottom sobre datos de muestra, vía `Analysis::build`) sin
-/// necesitar `AppHandle`/`State` (no toca SQLite ni red), lo que lo hace
-/// invocable con `tauri::test::mock_builder` sin tener que mockear el `Db`.
-#[cfg(test)]
-mod ipc_boundary_tests {
-    use tauri::ipc::CallbackFn;
-    use tauri::test::{mock_builder, mock_context, noop_assets};
-    use tauri::webview::InvokeRequest;
-
-    fn invoke_request(cmd: &str) -> InvokeRequest {
-        InvokeRequest {
-            cmd: cmd.into(),
-            callback: CallbackFn(0),
-            error: CallbackFn(1),
-            url: if cfg!(any(windows, target_os = "android")) {
-                "http://tauri.localhost"
-            } else {
-                "tauri://localhost"
-            }
-            .parse()
-            .unwrap(),
-            body: tauri::ipc::InvokeBody::default(),
-            headers: Default::default(),
-            invoke_key: tauri::test::INVOKE_KEY.to_string(),
-        }
-    }
-
-    /// Invoca `analyze_demo` real cruzando el borde IPC (no llama la función Rust
-    /// directo) y verifica que la respuesta trae el análisis con datos de muestra
-    /// bien armados: sin solapamiento top/bottom y totales consistentes con la
-    /// lógica de dominio (`sample()` + `Analysis::build`, misma que cubre
-    /// `analysis_build_no_solapa_top_y_bottom` a nivel unitario).
-    #[test]
-    fn analyze_demo_responde_via_ipc_real() {
-        let app = mock_builder()
-            .invoke_handler(tauri::generate_handler![super::analyze_demo])
-            .build(mock_context(noop_assets()))
-            .expect("no se pudo construir la app mockeada");
-        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-            .build()
-            .expect("no se pudo construir el webview mockeado");
-
-        // `Analysis` solo deriva `Serialize` (viaja del backend al frontend, nunca
-        // al revés), así que deserializamos a `serde_json::Value` genérico en vez
-        // de sumarle un `Deserialize` que el tipo de producción no necesita.
-        let body = tauri::test::get_ipc_response(&webview, invoke_request("analyze_demo"))
-            .expect("analyze_demo debe responder Ok vía IPC");
-        let analysis: serde_json::Value = body
-            .deserialize()
-            .expect("la respuesta debe deserializar a JSON");
-
-        assert_eq!(
-            analysis["total_commenters"], 4,
-            "sample() define 4 comentaristas fijos"
-        );
-        assert_eq!(
-            analysis["total_comments"], 9,
-            "sample() define 9 comentarios"
-        );
-        assert_eq!(
-            analysis["incomplete"], false,
-            "el demo no ingiere nada; nunca corta por cuota"
-        );
-        let ids_of = |field: &str| -> std::collections::HashSet<String> {
-            analysis[field]
-                .as_array()
-                .expect("top/bottom deben ser arrays")
-                .iter()
-                .map(|s| s["channel_id"].as_str().unwrap().to_string())
-                .collect()
-        };
-        assert!(
-            ids_of("top").is_disjoint(&ids_of("bottom")),
-            "el contrato top ∩ bottom = ∅ debe sobrevivir el viaje por IPC"
-        );
-    }
-
-    /// Un comando que existe como función Rust pero que alguien se olvidó de
-    /// sumar a `generate_handler!` falla SOLO en runtime (el compilador no lo
-    /// detecta). Este test fija esa señal: pedir un comando no registrado en
-    /// esta app mockeada debe volver `Err`, no colgarse ni paniquear.
-    #[test]
-    fn comando_no_registrado_falla_via_ipc_en_vez_de_colgarse() {
-        let app = mock_builder()
-            .invoke_handler(tauri::generate_handler![super::analyze_demo])
-            .build(mock_context(noop_assets()))
-            .expect("no se pudo construir la app mockeada");
-        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-            .build()
-            .expect("no se pudo construir el webview mockeado");
-
-        let res = tauri::test::get_ipc_response(&webview, invoke_request("comando_inexistente"));
-        assert!(
-            res.is_err(),
-            "invocar un comando no registrado debe fallar, no colgarse"
         );
     }
 }
