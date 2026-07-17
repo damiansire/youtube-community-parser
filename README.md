@@ -1,4 +1,4 @@
-# Subscriber Data Parser
+# YouTube Community Parser
 
 [![CI](https://github.com/damiansire/youtube-community-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/damiansire/youtube-community-parser/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -33,11 +33,14 @@ client that hits the [YouTube Data API v3](https://developers.google.com/youtube
 directly. This makes the app **distributable** (it doesn't require `node` or the
 source tree on the end user's machine).
 
+Internal crates use the historical `sdp-` prefix (from "Subscriber Data Parser",
+the project's original name).
+
 | Folder           | What it is                                                            |
 |------------------|----------------------------------------------------------------------|
 | `crates/core`    | Domain: `Commenter`, `Comment` and the rankings. No network, no UI.  |
-| `crates/storage` | Local SQLite persistence of the history. Each analysis is saved (idempotent upsert) and `analyze_history` re-analyzes it without spending quota again. |
-| `crates/llm`     | `sdp-llm`: multi-provider AI refinement layer (async `dyn`-compatible trait) behind the paid cost-confirmation gate. Adapters tested against a mocked HTTP server (`wiremock`), no real network. |
+| `crates/storage` | Local SQLite persistence of the history. Each analysis is saved (idempotent upsert, covered by `crates/storage/tests/`) and `analyze_history` re-analyzes it without spending quota again. |
+| `crates/llm`     | `sdp-llm`: multi-provider AI refinement layer (async `dyn`-compatible trait) behind the paid cost-confirmation gate. Adapters tested against a mocked HTTP server (`wiremock`, see `crates/llm/tests/`), no real network. |
 | `src-tauri`      | Tauri v2 backend + native YouTube client (`src/youtube.rs`).         |
 | `app`            | Webview frontend.                                                    |
 
